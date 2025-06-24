@@ -1,0 +1,82 @@
+{
+  "name": "scap",
+  "version": "0.0.8",
+  "description": "Modern, high-performance screen capture library for Node.js. Cross-platform.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/helmerapp/scap.git"
+  },
+  "keywords": [
+    "screen-capture",
+    "screen-recording",
+    "desktop-capture",
+    "video-capture",
+    "electron",
+    "native",
+    "rust",
+    "cross-platform"
+  ],
+  "author": "Helmer Team",
+  "license": "MIT",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "*.node"
+  ],
+  "engines": {
+    "node": ">= 10"
+  },
+  "os": [
+    "darwin",
+    "win32",
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "napi": {
+    "name": "scap",
+    "triples": {
+      "defaults": true,
+      "additional": [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-pc-windows-msvc",
+        "aarch64-unknown-linux-gnu"
+      ]
+    }
+  },
+  "scripts": {
+    "artifacts": "napi artifacts",
+    "build": "napi build --platform --release --features napi",
+    "build:debug": "napi build --platform --features napi",
+    "prepublishOnly": "napi prepublish -t npm",
+    "test": "node test/test.js",
+    "version": "napi version",
+    "postinstall": "node scripts/postinstall.js || echo 'Postinstall script failed, but installation can continue'"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.4",
+    "typescript": "^5.0.0"
+  },
+  "optionalDependencies": {
+    "scap-win32-x64-msvc": "0.0.8",
+    "scap-darwin-x64": "0.0.8",
+    "scap-darwin-arm64": "0.0.8",
+    "scap-linux-x64-gnu": "0.0.8",
+    "scap-linux-arm64-gnu": "0.0.8"
+  },
+  "peerDependencies": {
+    "electron": ">=13.0.0"
+  },
+  "peerDependenciesMeta": {
+    "electron": {
+      "optional": true
+    }
+  }
+}
