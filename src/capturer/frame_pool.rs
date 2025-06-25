@@ -1,6 +1,7 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::Mutex,
+    time::{Duration, Instant},
 };
 use anyhow::Result;
 use crate::frame::Frame;
@@ -9,6 +10,8 @@ use crate::frame::Frame;
 pub struct FramePool {
     video_buffers: Mutex<HashMap<usize, Vec<Vec<u8>>>>,
     audio_buffers: Mutex<HashMap<usize, Vec<Vec<u8>>>>,
+    frame_queue: Mutex<VecDeque<Frame>>,
+    last_frame_time: Mutex<Option<Instant>>,
 }
 
 impl FramePool {
@@ -17,6 +20,8 @@ impl FramePool {
         Self {
             video_buffers: Mutex::new(HashMap::new()),
             audio_buffers: Mutex::new(HashMap::new()),
+            frame_queue: Mutex::new(VecDeque::new()),
+            last_frame_time: Mutex::new(None),
         }
     }
 
@@ -70,20 +75,36 @@ impl FramePool {
 
     /// Gets the next frame from the pool
     pub fn get_next_frame(&self) -> Option<Frame> {
-        // Implementation would depend on your frame storage strategy
-        None // Placeholder implementation
+        let timeout = Duration::from_millis(100);
+        let start_time = Instant::now();
+        
+        while start_time.elapsed() < timeout {
+            if let Ok(mut queue) = self.frame_queue.try_lock() {
+                if let Some(frame) = queue.pop_front() {
+                    return Some(frame);
+                }
+            }
+            // Small sleep to avoid busy waiting
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        None
     }
     
     /// Pushes a frame into the pool
-    pub fn push_frame(&self, _frame: Vec<u8>) -> Option<Frame> {
-        // Implementation would process and store the frame
-        None // Placeholder implementation
+    pub fn push_frame(&self, frame: Frame) {
+        if let Ok(mut queue) = self.frame_queue.try_lock() {
+            // Keep queue size reasonable
+            while queue.len() > 30 {
+                queue.pop_front();
+            }
+            queue.push_back(frame);
+            *self.last_frame_time.lock().unwrap() = Some(Instant::now());
+        }
     }
     
     /// Pops a frame from the pool
     pub fn pop_frame(&self) -> Option<Frame> {
-        // Implementation would retrieve the next available frame
-        None // Placeholder implementation
+        self.frame_queue.lock().ok()?.pop_front()
     }
 }
 

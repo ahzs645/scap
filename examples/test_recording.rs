@@ -8,11 +8,11 @@ use std::{
     fs::File,
     io::{BufWriter, Write},
     time::{Duration, Instant},
+    thread,
 };
-use tokio::time::sleep;
 use anyhow::Result;
 
-async fn test_screen_recording() -> Result<()> {
+fn test_screen_recording() -> Result<()> {
     println!("\n🖥️  Testing Screen Recording");
     println!("==========================");
 
@@ -36,7 +36,7 @@ async fn test_screen_recording() -> Result<()> {
     println!("✅ Screen capturer created successfully");
 
     println!("\n🔴 Starting screen recording test...");
-    capturer.start_capture().await?;
+    capturer.start_capture()?;
 
     // Record for 5 seconds
     let recording_duration = Duration::from_secs(5);
@@ -50,7 +50,7 @@ async fn test_screen_recording() -> Result<()> {
     println!("📸 Recording {} seconds of screen content...", recording_duration.as_secs());
     
     while start_time.elapsed() < recording_duration {
-        match capturer.get_next_frame().await {
+        match capturer.get_next_frame() {
             Ok(Frame::BGRA(frame)) => {
                 if first_frame_data.is_none() {
                     println!("   📐 Screen dimensions: {}x{}", frame.width, frame.height);
@@ -67,10 +67,10 @@ async fn test_screen_recording() -> Result<()> {
                 println!("   ⚠️  Frame error: {}", e);
             }
         }
-        sleep(Duration::from_millis(5)).await;
+        thread::sleep(Duration::from_millis(5));
     }
 
-    capturer.stop_capture().await?;
+    capturer.stop_capture()?;
     
     // Save sample frame
     if let Some((data, width, height)) = first_frame_data {
@@ -98,7 +98,7 @@ async fn test_screen_recording() -> Result<()> {
     Ok(())
 }
 
-async fn test_window_recording() -> Result<()> {
+fn test_window_recording() -> Result<()> {
     println!("\n🪟 Testing Window Recording");
     println!("=========================");
 
@@ -163,7 +163,7 @@ async fn test_window_recording() -> Result<()> {
     };
 
     println!("\n🔴 Starting window recording test...");
-    capturer.start_capture().await?;
+    capturer.start_capture()?;
 
     // Record for 5 seconds
     let recording_duration = Duration::from_secs(5);
@@ -178,7 +178,7 @@ async fn test_window_recording() -> Result<()> {
     println!("💡 Try interacting with the window during recording!");
     
     while start_time.elapsed() < recording_duration {
-        match capturer.get_next_frame().await {
+        match capturer.get_next_frame() {
             Ok(Frame::BGRA(frame)) => {
                 if first_frame_data.is_none() {
                     println!("   📐 Window capture dimensions: {}x{}", frame.width, frame.height);
@@ -195,10 +195,10 @@ async fn test_window_recording() -> Result<()> {
                 println!("   ⚠️  Frame error: {}", e);
             }
         }
-        sleep(Duration::from_millis(5)).await;
+        thread::sleep(Duration::from_millis(5));
     }
 
-    capturer.stop_capture().await?;
+    capturer.stop_capture()?;
     
     // Save sample frame
     if let Some((data, width, height)) = first_frame_data {
@@ -235,8 +235,7 @@ async fn test_window_recording() -> Result<()> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     println!("🧪 SCAP RECORDING TEST SUITE");
     println!("===========================");
 
@@ -257,8 +256,8 @@ async fn main() -> Result<()> {
     }
 
     // Run tests
-    test_screen_recording().await?;
-    test_window_recording().await?;
+    test_screen_recording()?;
+    test_window_recording()?;
 
     println!("\n🎉 Testing completed!");
     Ok(())

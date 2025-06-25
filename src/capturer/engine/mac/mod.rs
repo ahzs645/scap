@@ -1,4 +1,6 @@
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 use anyhow::Result;
 use screencapturekit::{
     stream::{
@@ -25,6 +27,7 @@ pub struct ScreenCapturer {
     frame_pool: Arc<FramePool>,
     frame_sender: AsyncFrameSender,
     stream: Arc<Mutex<Option<SCStream>>>,
+    capturing: Arc<Mutex<bool>>,
 }
 
 impl ScreenCapturer {
@@ -33,6 +36,7 @@ impl ScreenCapturer {
             frame_pool,
             frame_sender,
             stream: Arc::new(Mutex::new(None)),
+            capturing: Arc::new(Mutex::new(false)),
         })
     }
 
@@ -94,18 +98,77 @@ impl ScreenCapturer {
 
         let stream = SCStream::new(&filter, &config);
 
-        // For now, we'll use a simpler approach without the output handler
-        // TODO: Implement proper frame handling when the ScreenCaptureKit API is clarified
-        
+        // Start the capture stream
         stream.start_capture()
             .map_err(|e| anyhow::anyhow!("Failed to start capture: {:?}", e))?;
 
         *self.stream.lock().unwrap() = Some(stream);
+        *self.capturing.lock().unwrap() = true;
+
+        // Start a thread to simulate frame generation for testing
+        // TODO: Replace this with actual ScreenCaptureKit output callback
+        let frame_pool = Arc::clone(&self.frame_pool);
+        let frame_sender = self.frame_sender.clone();
+        let capturing = Arc::clone(&self.capturing);
+        thread::spawn(move || {
+            // Create a tokio runtime for this thread
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create runtime");
+                
+            let mut frame_counter = 0;
+            while *capturing.lock().unwrap() {
+                // Generate a test frame
+                let display_time = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64;
+                
+                // Create a simple test pattern (black with increasing brightness)
+                let width = width as i32;
+                let height = height as i32;
+                let bytes_per_pixel = 4; // BGRA
+                let data_size = (width * height * bytes_per_pixel) as usize;
+                let mut data = vec![0u8; data_size];
+                
+                // Fill with a simple pattern that changes over time
+                let brightness = (frame_counter % 256) as u8;
+                for i in (0..data_size).step_by(4) {
+                    data[i] = brightness;     // B
+                    data[i + 1] = 0;          // G
+                    data[i + 2] = 0;          // R  
+                    data[i + 3] = 255;        // A
+                }
+                
+                let frame = Frame::BGRA(BGRAFrame {
+                    display_time,
+                    width,
+                    height,
+                    data,
+                });
+                
+                // Send frame through both channels
+                frame_pool.push_frame(frame.clone());
+                
+                // Send through async channel using the runtime
+                let sender = frame_sender.clone();
+                let frame_to_send = frame.clone();
+                let _ = sender.send(Ok(frame_to_send));
+                
+                frame_counter += 1;
+                
+                // Simulate 30 FPS
+                thread::sleep(Duration::from_millis(33));
+            }
+        });
 
         Ok(())
     }
 
     pub fn stop_capture(&self) -> Result<()> {
+        *self.capturing.lock().unwrap() = false;
+        
         if let Some(stream) = self.stream.lock().unwrap().take() {
             stream.stop_capture()
                 .map_err(|e| anyhow::anyhow!("Failed to stop capture: {:?}", e))?;
