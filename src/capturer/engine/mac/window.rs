@@ -1,14 +1,17 @@
 use anyhow::{anyhow, Result};
 use core_graphics::window::CGWindowID;
 use screencapturekit::{
-    stream::{SCStream, SCStreamConfiguration},
-    SCContentFilter,
-    SCWindow,
+    stream::{SCStream, configuration::SCStreamConfiguration},
+    stream::content_filter::SCContentFilter,
+    shareable_content::window::SCWindow,
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::Target;
+use crate::{
+    capturer::{Area, Options, Point, Resolution, Size},
+    Target,
+};
 
 #[derive(Debug, Clone)]
 pub struct WindowState {
@@ -46,174 +49,137 @@ pub enum WindowEvent {
 }
 
 pub struct WindowCaptureSession {
-    window_id: u32,
-    state: Arc<Mutex<WindowState>>,
     stream: SCStream,
+    window_id: CGWindowID,
+    state: Arc<Mutex<WindowState>>,
 }
 
 impl WindowCaptureSession {
-    pub fn new(window_id: u32, stream: SCStream) -> Self {
+    pub async fn new(window: &SCWindow, options: &Options) -> Result<Self> {
+        let window_id = window.window_id() as u32;
+        
         let state = Arc::new(Mutex::new(WindowState {
             is_visible: true,
             is_minimized: false,
             is_occluded: false,
-            bounds: core_graphics::geometry::CGRect::new(
-                &core_graphics::geometry::CGPoint::new(0.0, 0.0),
-                &core_graphics::geometry::CGSize::new(0.0, 0.0),
-            ),
+            bounds: window.frame(),
             z_order: 0,
-            has_shadow: true,
+            has_shadow: options.include_window_shadow.unwrap_or(true),
             is_transparent: false,
         }));
 
-        Self {
+        let filter = create_window_filter(window, options)?;
+        let config = configure_stream_for_window(options)?;
+        
+        let stream = SCStream::new(&filter, &config)
+            .map_err(|e| anyhow!("Failed to create stream: {}", e))?;
+
+        Ok(Self {
+            stream,
             window_id,
             state,
-            stream,
-        }
+        })
     }
 
-    pub async fn handle_window_event(&mut self, event: WindowEvent) -> Result<()> {
+    pub async fn start(&mut self) -> Result<()> {
+        self.stream.start_capture()
+            .map_err(|e| anyhow!("Failed to start capture: {}", e))
+    }
+
+    pub async fn stop(&mut self) -> Result<()> {
+        self.stream.stop_capture()
+            .map_err(|e| anyhow!("Failed to stop capture: {}", e))
+    }
+
+    pub async fn update_state(&mut self) -> Result<()> {
         let mut state = self.state.lock().await;
-        match event {
-            WindowEvent::Closed => {
-                self.stream.stop_capture()?;
-                Ok(())
-            }
-            WindowEvent::Minimized => {
-                state.is_minimized = true;
-                state.is_visible = false;
-                self.stream.stop_capture()?;
-                Ok(())
-            }
-            WindowEvent::Restored => {
-                state.is_minimized = false;
-                state.is_visible = true;
-                self.stream.start_capture()?;
-                Ok(())
-            }
-            WindowEvent::Moved | WindowEvent::Resized => {
-                // Update window bounds
-                if let Some(new_bounds) = get_window_bounds_with_shadow(self.window_id) {
-                    state.bounds = new_bounds;
-                }
-                Ok(())
-            }
-            WindowEvent::OcclusionChanged => {
-                state.is_occluded = is_window_occluded(self.window_id);
-                Ok(())
-            }
-        }
-    }
-
-    pub async fn is_window_capturable(&self) -> bool {
-        let state = self.state.lock().await;
-        state.is_visible && !state.is_minimized && !state.is_occluded
-    }
-}
-
-pub fn configure_stream_for_window(
-    config: &mut SCStreamConfiguration,
-    window: &Target,
-    options: &crate::capturer::Options,
-) -> Result<()> {
-    if let Target::Window(window_info) = window {
-        // Get actual window bounds including shadow
-        let bounds = get_window_bounds_with_shadow(window_info.id)
-            .ok_or_else(|| anyhow!("Failed to get window bounds"))?;
-
-        // Configure stream for window capture
-        config.set_width(bounds.size.width as u32);
-        config.set_height(bounds.size.height as u32);
-        config.set_shows_cursor(options.show_cursor);
-
-        // Set window-specific options
-        config.set_captures_shadow(true);
-        config.set_pixel_format(screencapturekit::sys::kCVPixelFormatType_32BGRA);
-
-        // Apply padding if specified
-        if let Some(padding) = options.window_frame_padding {
-            let padded_width = bounds.size.width + (padding * 2.0);
-            let padded_height = bounds.size.height + (padding * 2.0);
-            config.set_width(padded_width as u32);
-            config.set_height(padded_height as u32);
-        }
-    }
-    Ok(())
-}
-
-pub fn create_window_filter(window: &Target, options: &crate::capturer::Options) -> Result<SCContentFilter> {
-    if let Target::Window(window_info) = window {
-        let sc_window = get_sc_window(window_info.id)
-            .ok_or_else(|| anyhow!("Failed to get SCWindow"))?;
-
-        let mut filter = SCContentFilter::new()
-            .with_desktop_independent_window(&sc_window);
-
-        // Optionally exclude overlapping windows
-        if options.exclude_overlapping_windows.unwrap_or(false) {
-            let overlapping = get_overlapping_windows(&sc_window);
-            filter = filter.excluding_windows(&overlapping);
-        }
-
-        Ok(filter)
-    } else {
-        Err(anyhow!("Not a window target"))
-    }
-}
-
-fn get_window_bounds_with_shadow(window_id: CGWindowID) -> Option<core_graphics::geometry::CGRect> {
-    use core_graphics::window::{
-        kCGWindowListOptionIncludingWindow,
-        CGWindowListCopyWindowInfo,
-    };
-    use core_foundation::{
-        array::CFArray,
-        dictionary::CFDictionary,
-        base::TCFType,
-    };
-
-    unsafe {
-        let window_list = CGWindowListCopyWindowInfo(
-            kCGWindowListOptionIncludingWindow,
-            window_id as u32,
-        );
         
-        if let Some(window_list) = window_list {
-            let array: CFArray = window_list.into_CFArray();
-            if array.len() > 0 {
-                if let Some(dict) = array.get(0) {
-                    let dict: CFDictionary = dict.into_CFDictionary();
-                    // Extract bounds including shadow
-                    // Implementation would use CGWindowBounds key
-                    // For now return a placeholder
-                    return Some(core_graphics::geometry::CGRect::new(
-                        &core_graphics::geometry::CGPoint::new(0.0, 0.0),
-                        &core_graphics::geometry::CGSize::new(800.0, 600.0),
-                    ));
-                }
-            }
+        // Update window state
+        if let Some(window) = get_window_info(self.window_id) {
+            state.is_visible = window.is_on_screen();
+            state.is_minimized = window.is_minimized();
+            state.is_occluded = is_window_occluded(self.window_id);
+            state.bounds = window.frame();
+        } else {
+            return Err(anyhow!("Window no longer exists"));
+        }
+        
+        Ok(())
+    }
+}
+
+pub fn create_window_filter(window: &SCWindow, options: &Options) -> Result<SCContentFilter> {
+    let mut filter = SCContentFilter::new();
+    
+    // Set window as content source
+    filter = filter.with_window(window);
+    
+    // Configure window-specific options
+    if let Some(exclude_overlapping) = options.exclude_overlapping_windows {
+        if exclude_overlapping {
+            filter = filter.exclude_overlapping_windows();
         }
     }
-    None
+    
+    if let Some(include_shadow) = options.include_window_shadow {
+        if include_shadow {
+            filter = filter.include_window_shadow();
+        }
+    }
+    
+    Ok(filter)
+}
+
+pub fn configure_stream_for_window(options: &Options) -> Result<SCStreamConfiguration> {
+    let mut config = SCStreamConfiguration::new();
+    
+    // Set basic stream properties
+    config.set_shows_cursor(options.show_cursor);
+    config.set_pixel_format(screencapturekit::sys::kCVPixelFormatType_32BGRA);
+    
+    if let Some(fps) = Some(options.fps) {
+        config.set_minimum_frame_interval(1.0 / fps as f64);
+    }
+    
+    // Configure window-specific options
+    if let Some(padding) = options.window_frame_padding {
+        config.set_window_frame_padding(padding);
+    }
+    
+    if let Some(match_res) = options.match_window_resolution {
+        config.set_matches_window_resolution(match_res);
+    }
+    
+    // Configure audio if enabled
+    if let Some(window_audio) = &options.window_audio {
+        config.set_captures_audio(true);
+        config.set_audio_application_only(window_audio.capture_window_audio_only);
+        config.set_audio_ducking(window_audio.audio_ducking);
+        
+        if let Some(rate) = options.audio_sample_rate {
+            config.set_sample_rate(rate);
+        }
+        
+        if let Some(channels) = options.audio_channel_count {
+            config.set_channel_count(channels as u8);
+        }
+    }
+    
+    Ok(config)
+}
+
+fn get_window_info(window_id: CGWindowID) -> Option<SCWindow> {
+    if let Ok(content) = screencapturekit::ShareableContent::current() {
+        content.windows().into_iter()
+            .find(|w| w.window_id() as u32 == window_id)
+    } else {
+        None
+    }
 }
 
 fn is_window_occluded(window_id: CGWindowID) -> bool {
-    // Implementation would check window occlusion state
-    // For now return a placeholder
+    // TODO: Implement window occlusion detection
     false
-}
-
-fn get_sc_window(window_id: CGWindowID) -> Option<SCWindow> {
-    // Implementation would get SCWindow from window ID
-    // For now return None as placeholder
-    None
-}
-
-fn get_overlapping_windows(window: &SCWindow) -> Vec<SCWindow> {
-    // Implementation would find overlapping windows
-    // For now return empty vec as placeholder
-    vec![]
 }
 
 pub fn get_detailed_window_list() -> Result<Vec<WindowInfo>> {

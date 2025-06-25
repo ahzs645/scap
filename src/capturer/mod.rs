@@ -1,5 +1,3 @@
-pub mod engine;
-
 use std::{error::Error, sync::mpsc};
 use std::sync::Arc;
 use anyhow::Result;
@@ -17,10 +15,10 @@ use crate::{
 
 pub use engine::get_output_frame_size;
 
-mod async_frame;
-mod engine;
-mod frame_pool;
-mod error_recovery;
+pub mod async_frame;
+pub mod engine;
+pub mod frame_pool;
+pub mod error_recovery;
 
 pub use engine::Engine;
 use async_frame::{AsyncFrameReceiver, AsyncFrameSender, CaptureState};
@@ -217,85 +215,65 @@ impl Capturer {
 
     /// Build a new [Capturer] instance with the provided options
     pub fn build(options: Options) -> Result<Self> {
-        let (frame_receiver, frame_sender) = AsyncFrameReceiver::new(32); // Buffer size of 32 frames
-        let state = Arc::new(Mutex::new(CaptureState::Idle));
         let frame_pool = Arc::new(FramePool::new(10)); // Pool size of 10 buffers
-        let error_recovery = ErrorRecovery::new(Arc::clone(&state), None);
+        let (frame_sender, frame_receiver) = async_frame::create_channel();
+        let state = Arc::new(Mutex::new(CaptureState::Stopped));
+        
+        let error_recovery = ErrorRecovery::new(ErrorRecoveryConfig::default());
         
         let engine = Engine::new(options, frame_sender, Arc::clone(&frame_pool))?;
         
         Ok(Self {
             engine,
             frame_receiver,
-            state: Arc::clone(&state),
+            state,
             frame_pool,
             error_recovery,
         })
     }
 
     /// Start capturing the frames
-    pub async fn start_capture(&mut self) {
-        {
-            let mut state = self.state.lock().await;
-            *state = CaptureState::Starting;
+    pub async fn start_capture(&mut self) -> Result<()> {
+        let mut state = self.state.lock().await;
+        if *state == CaptureState::Running {
+            return Ok(());
         }
         
-        if let Err(e) = self.engine.start_capture().await {
-            log::error!("Failed to start capture: {}", e);
-            if !self.error_recovery.handle_error(&e.to_string()).await {
-                return;
-            }
-        }
-        
-        {
-            let mut state = self.state.lock().await;
-            *state = CaptureState::Running;
-        }
+        self.engine.start_capture().await?;
+        *state = CaptureState::Running;
+        Ok(())
     }
 
     /// Stop the capturer
-    pub async fn stop_capture(&mut self) {
-        {
-            let mut state = self.state.lock().await;
-            *state = CaptureState::Stopping;
+    pub async fn stop_capture(&mut self) -> Result<()> {
+        let mut state = self.state.lock().await;
+        if *state == CaptureState::Stopped {
+            return Ok(());
         }
         
-        if let Err(e) = self.engine.stop_capture().await {
-            log::error!("Failed to stop capture: {}", e);
-        }
-        
-        {
-            let mut state = self.state.lock().await;
-            *state = CaptureState::Idle;
-        }
+        self.engine.stop_capture().await?;
+        *state = CaptureState::Stopped;
+        Ok(())
     }
 
     /// Get the next captured frame
     pub async fn get_next_frame(&mut self) -> Result<Frame> {
-        match self.frame_receiver.next_frame().await {
-            Some(frame) => {
-                match &frame {
-                    Ok(frame) => {
-                        // Return buffers to pool after frame is processed
-                        match frame {
-                            Frame::RGB(f) | Frame::BGR0(f) | Frame::BGRA(f) => {
-                                self.frame_pool.return_video_buffer(f.data.clone());
-                            }
-                            Frame::SystemAudio(f) | Frame::MicrophoneAudio(f) => {
-                                self.frame_pool.return_audio_buffer(f.data.clone());
-                            }
-                            _ => {}
-                        }
-                    }
-                    Err(e) => {
-                        if !self.error_recovery.handle_error(&e.to_string()).await {
-                            return Err(anyhow::anyhow!("Max retry attempts reached"));
-                        }
-                    }
+        let state = self.state.lock().await;
+        if *state != CaptureState::Running {
+            return Err(anyhow::anyhow!("Capturer is not running"));
+        }
+        drop(state);
+
+        match self.frame_receiver.recv().await {
+            Ok(frame) => Ok(frame),
+            Err(e) => {
+                if let Some(retry_after) = self.error_recovery.handle_error(&e).await {
+                    tokio::time::sleep(retry_after).await;
+                    self.get_next_frame().await
+                } else {
+                    Err(e.into())
                 }
-                frame
             }
-            None => Err(anyhow::anyhow!("Frame channel closed")),
         }
     }
 

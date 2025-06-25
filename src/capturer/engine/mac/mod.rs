@@ -13,6 +13,7 @@ use screencapturekit::{
         SCStream,
     },
 };
+use tokio::sync::Mutex;
 
 use crate::frame::{Frame, FrameType};
 use crate::targets::Target;
@@ -39,6 +40,8 @@ use window::{WindowCaptureSession, WindowEvent, configure_stream_for_window, cre
 pub struct ScreenCapturer {
     frame_sender: AsyncFrameSender,
     frame_pool: Arc<FramePool>,
+    stream: Option<SCStream>,
+    window_session: Option<WindowCaptureSession>,
 }
 
 impl ScreenCapturer {
@@ -46,32 +49,113 @@ impl ScreenCapturer {
         Self {
             frame_sender,
             frame_pool,
+            stream: None,
+            window_session: None,
         }
     }
-}
 
-impl SCStreamOutputTrait for ScreenCapturer {
-    fn did_output_sample_buffer(&self, sample: CMSampleBuffer, of_type: SCStreamOutputType) {
-        let pixel_buffer = PixelBuffer::from_channel_item((sample.clone(), of_type));
-        if let Some(pixel_buffer) = pixel_buffer {
-            let width = pixel_buffer.width() as i32;
-            let height = pixel_buffer.height() as i32;
-            let bytes_per_row = pixel_buffer.bytes_per_row();
-            let display_time = pixel_buffer.display_time();
-
-            // Get a buffer from the pool
-            let mut buffer = self.frame_pool.get_video_buffer(bytes_per_row * height as usize);
-            buffer.extend_from_slice(&pixel_buffer.buffer().data());
-
-            let frame = Frame::BGRA(crate::frame::BGRAFrame {
-                display_time,
-                width,
-                height,
-                data: buffer,
-            });
-
-            self.frame_sender.send_frame(Ok(frame)).unwrap_or(());
+    pub async fn start_capture(&mut self, options: &Options) -> Result<()> {
+        match &options.target {
+            Some(Target::Window(window)) => {
+                let content = SCShareableContent::current()
+                    .map_err(|e| anyhow!("Failed to get shareable content: {}", e))?;
+                
+                let sc_window = content.windows()
+                    .into_iter()
+                    .find(|w| w.window_id() as u32 == window.id)
+                    .ok_or_else(|| anyhow!("Window not found"))?;
+                
+                let mut session = WindowCaptureSession::new(&sc_window, options).await?;
+                session.start().await?;
+                self.window_session = Some(session);
+            }
+            Some(Target::Display(display)) => {
+                let content = SCShareableContent::current()
+                    .map_err(|e| anyhow!("Failed to get shareable content: {}", e))?;
+                
+                let sc_display = content.displays()
+                    .into_iter()
+                    .find(|d| d.display_id() as u32 == display.id)
+                    .ok_or_else(|| anyhow!("Display not found"))?;
+                
+                let filter = SCContentFilter::new()
+                    .with_display(&sc_display);
+                
+                let mut config = SCStreamConfiguration::new();
+                config.set_width(display.width as u32);
+                config.set_height(display.height as u32);
+                config.set_shows_cursor(options.show_cursor);
+                config.set_pixel_format(screencapturekit::sys::kCVPixelFormatType_32BGRA);
+                
+                if let Some(fps) = Some(options.fps) {
+                    config.set_minimum_frame_interval(1.0 / fps as f64);
+                }
+                
+                let stream = SCStream::new(&filter, &config)
+                    .map_err(|e| anyhow!("Failed to create stream: {}", e))?;
+                
+                stream.start_capture()
+                    .map_err(|e| anyhow!("Failed to start capture: {}", e))?;
+                
+                self.stream = Some(stream);
+            }
+            None => {
+                return Err(anyhow!("No target specified"));
+            }
         }
+        
+        Ok(())
+    }
+
+    pub async fn stop_capture(&mut self) -> Result<()> {
+        if let Some(session) = &mut self.window_session {
+            session.stop().await?;
+            self.window_session = None;
+        }
+        
+        if let Some(stream) = &self.stream {
+            stream.stop_capture()
+                .map_err(|e| anyhow!("Failed to stop capture: {}", e))?;
+            self.stream = None;
+        }
+        
+        Ok(())
+    }
+
+    pub fn handle_frame(&mut self, sample_buffer: CMSampleBuffer) -> Result<()> {
+        match PixelBuffer::from_sample_buffer(&sample_buffer) {
+            Ok(pixel_buffer) => {
+                let mut buffer = self.frame_pool.get_video_buffer(pixel_buffer.size())?;
+                buffer.extend_from_slice(&pixel_buffer.data());
+                
+                let frame = Frame::BGRA(crate::frame::BGRAFrame {
+                    data: buffer,
+                    width: pixel_buffer.width() as u32,
+                    height: pixel_buffer.height() as u32,
+                    stride: pixel_buffer.bytes_per_row() as u32,
+                });
+                
+                self.frame_sender.send(frame)?;
+            }
+            Err(e) => {
+                log::error!("Failed to process pixel buffer: {}", e);
+            }
+        }
+        
+        Ok(())
+    }
+
+    pub fn handle_audio(&mut self, sample_buffer: CMSampleBuffer) -> Result<()> {
+        match process_audio_buffer(&sample_buffer, &self.frame_pool) {
+            Ok(frame) => {
+                self.frame_sender.send(frame)?;
+            }
+            Err(e) => {
+                log::error!("Failed to process audio buffer: {}", e);
+            }
+        }
+        
+        Ok(())
     }
 }
 
