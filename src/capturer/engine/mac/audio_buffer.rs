@@ -1,82 +1,167 @@
 use anyhow::{Context, Result};
 use core_media_rs::cm_sample_buffer::CMSampleBuffer;
-use crate::frame::AudioFrame;
+use crate::frame::{AudioFrame, AudioSource};
+use crate::capturer::frame_pool::FramePool;
 
-/// Process audio sample buffer from ScreenCaptureKit
+/// Audio format configuration
+#[derive(Debug, Clone)]
+pub struct AudioConfig {
+    pub sample_rate: Option<u32>,
+    pub channel_count: Option<u32>,
+    pub buffer_duration: std::time::Duration,
+    pub enable_echo_cancellation: bool,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self {
+            sample_rate: None, // Will be detected from stream
+            channel_count: None, // Will be detected from stream
+            buffer_duration: std::time::Duration::from_millis(20),
+            enable_echo_cancellation: false,
+        }
+    }
+}
+
+/// Process audio sample buffer from ScreenCaptureKit with proper format detection
 pub fn process_audio_sample_buffer(sample_buffer: CMSampleBuffer) -> Result<AudioFrame> {
-    // Get audio buffer list from the sample buffer
+    // Get audio format description from the sample buffer
+    let format_description = sample_buffer
+        .get_format_description()
+        .context("Failed to get format description")?;
+    
+    let audio_format = format_description
+        .get_audio_stream_basic_description()
+        .context("Failed to get audio stream description")?;
+    
+    // Extract actual format parameters
+    let sample_rate = audio_format.sample_rate as u32;
+    let channel_count = audio_format.channels_per_frame as u32;
+    let bits_per_sample = audio_format.bits_per_channel as u32;
+    let bytes_per_sample = (bits_per_sample / 8) as usize;
+    
+    // Get audio buffer list
     let audio_buffer_list = sample_buffer
         .get_audio_buffer_list()
         .context("Failed to get audio buffer list")?;
     
-    // Use current time as display time (timing will be handled by the stream)
+    // Get timing info
     let display_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64;
     
-    // Extract audio format parameters
-    // For ScreenCaptureKit audio, we typically get:
-    // - 48kHz sample rate
-    // - 2 channels (stereo)
-    // - 32-bit float samples
-    let sample_rate = 48000u32; // ScreenCaptureKit typically uses 48kHz
-    let channel_count = 2u32;   // Typically stereo
-    let bits_per_sample = 32u32; // 32-bit float
-    let bytes_per_sample = 4usize; // 4 bytes per float32 sample
-    
-    // Process all audio buffers and combine the data
+    // Process all audio buffers
     let mut combined_data = Vec::new();
     let mut total_sample_count = 0u32;
     
-    // Process each buffer in the buffer list
-    for buffer_index in 0..audio_buffer_list.num_buffers() {
-        let buffer = audio_buffer_list
-            .get(buffer_index)
-            .context("Failed to get audio buffer")?;
+    // Handle different buffer layouts
+    match audio_buffer_list.num_buffers() {
+        0 => return Err(anyhow::anyhow!("No audio buffers found")),
         
-        // Get the raw audio data from this buffer
-        let audio_data = buffer.data();
-        let buffer_channels = buffer.number_channels as u32;
-        
-        // Validate buffer data
-        if audio_data.is_empty() {
-            continue;
+        1 => {
+            // Single interleaved buffer
+            let buffer = audio_buffer_list.get(0).context("Failed to get audio buffer")?;
+            let audio_data = buffer.data();
+            
+            if audio_data.is_empty() {
+                return Err(anyhow::anyhow!("Empty audio buffer"));
+            }
+            
+            // Validate buffer format
+            let buffer_channels = buffer.number_channels as u32;
+            if buffer_channels != channel_count {
+                log::warn!(
+                    "Channel count mismatch. Format: {}, Buffer: {}",
+                    channel_count,
+                    buffer_channels
+                );
+            }
+            
+            // Calculate frame count
+            let bytes_per_frame = bytes_per_sample * channel_count as usize;
+            let sample_frames = audio_data.len() / bytes_per_frame;
+            
+            combined_data = audio_data.to_vec();
+            total_sample_count = sample_frames as u32;
         }
         
-        // Calculate the number of sample frames in this buffer
-        // Each sample frame contains one sample for each channel
-        let bytes_per_frame = bytes_per_sample * buffer_channels as usize;
-        let sample_frames_in_buffer = audio_data.len() / bytes_per_frame;
-        
-        // Ensure we have complete sample frames
-        let valid_data_size = sample_frames_in_buffer * bytes_per_frame;
-        if valid_data_size > 0 {
-            combined_data.extend_from_slice(&audio_data[..valid_data_size]);
-            total_sample_count += sample_frames_in_buffer as u32;
+        2 => {
+            // Likely separate left/right channels
+            let left = audio_buffer_list.get(0).context("Failed to get left buffer")?;
+            let right = audio_buffer_list.get(1).context("Failed to get right buffer")?;
+            
+            if left.number_channels != 1 || right.number_channels != 1 {
+                return Err(anyhow::anyhow!("Expected mono buffers for stereo audio"));
+            }
+            
+            let left_data = left.data();
+            let right_data = right.data();
+            
+            if left_data.is_empty() || right_data.is_empty() {
+                return Err(anyhow::anyhow!("Empty channel buffer"));
+            }
+            
+            // Ensure equal buffer sizes
+            let samples_per_channel = left_data.len() / bytes_per_sample;
+            if left_data.len() != right_data.len() {
+                log::warn!(
+                    "Channel size mismatch. L: {}, R: {}",
+                    left_data.len(),
+                    right_data.len()
+                );
+            }
+            
+            // Interleave channels
+            combined_data = Vec::with_capacity(samples_per_channel * bytes_per_sample * 2);
+            
+            for i in 0..samples_per_channel {
+                let start = i * bytes_per_sample;
+                let end = start + bytes_per_sample;
+                
+                combined_data.extend_from_slice(&left_data[start..end]);
+                combined_data.extend_from_slice(&right_data[start..end]);
+            }
+            
+            total_sample_count = samples_per_channel as u32;
         }
         
-        // Debug info for first few buffers
-        if buffer_index < 3 {
-            println!("Audio buffer {}: {} channels, {} bytes, {} sample frames", 
-                buffer_index, buffer_channels, audio_data.len(), sample_frames_in_buffer);
-        }
-    }
-    
-    // Validate final audio data
-    if combined_data.is_empty() {
-        return Err(anyhow::anyhow!("No valid audio data found in sample buffer"));
-    }
-    
-    // Additional validation: ensure data size matches expected format
-    let expected_total_bytes = total_sample_count as usize * bytes_per_sample * channel_count as usize;
-    if combined_data.len() != expected_total_bytes {
-        println!("Warning: Audio data size mismatch. Expected: {}, Got: {}", 
-            expected_total_bytes, combined_data.len());
-        
-        // Truncate to expected size to avoid format issues
-        if combined_data.len() > expected_total_bytes {
-            combined_data.truncate(expected_total_bytes);
+        n => {
+            // Multi-channel audio
+            let mut max_samples = 0;
+            let mut channel_data = Vec::with_capacity(n as usize);
+            
+            for i in 0..n {
+                let buffer = audio_buffer_list
+                    .get(i)
+                    .with_context(|| format!("Failed to get buffer {}", i))?;
+                
+                let data = buffer.data();
+                if data.is_empty() {
+                    continue;
+                }
+                
+                let samples = data.len() / bytes_per_sample;
+                max_samples = max_samples.max(samples);
+                channel_data.push(data);
+            }
+            
+            // Interleave all channels
+            combined_data = Vec::with_capacity(max_samples * bytes_per_sample * n as usize);
+            
+            for sample_idx in 0..max_samples {
+                for channel in &channel_data {
+                    let start = sample_idx * bytes_per_sample;
+                    if start + bytes_per_sample <= channel.len() {
+                        combined_data.extend_from_slice(&channel[start..start + bytes_per_sample]);
+                    } else {
+                        // Pad missing samples with silence
+                        combined_data.extend_from_slice(&vec![0; bytes_per_sample]);
+                    }
+                }
+            }
+            
+            total_sample_count = max_samples as u32;
         }
     }
     
@@ -87,7 +172,7 @@ pub fn process_audio_sample_buffer(sample_buffer: CMSampleBuffer) -> Result<Audi
         sample_count: total_sample_count,
         data: combined_data,
         bits_per_sample,
-        source: crate::frame::AudioSource::System,
+        source: AudioSource::System,
     })
 }
 
@@ -208,75 +293,174 @@ pub fn process_audio_sample_buffer_simple(sample_buffer: CMSampleBuffer) -> Resu
 }
 
 /// Enhanced audio processing with format validation
-pub fn process_audio_sample_buffer_enhanced(sample_buffer: CMSampleBuffer) -> Result<AudioFrame> {
+pub fn process_audio_sample_buffer_enhanced(
+    sample_buffer: CMSampleBuffer,
+    frame_pool: &FramePool,
+) -> Result<AudioFrame> {
+    // Get audio format description from the sample buffer
+    let format_description = sample_buffer
+        .get_format_description()
+        .context("Failed to get format description")?;
+    
+    let audio_format = format_description
+        .get_audio_stream_basic_description()
+        .context("Failed to get audio stream description")?;
+    
+    // Extract actual format parameters
+    let sample_rate = audio_format.sample_rate as u32;
+    let channel_count = audio_format.channels_per_frame as u32;
+    let bits_per_sample = audio_format.bits_per_channel as u32;
+    let bytes_per_sample = (bits_per_sample / 8) as usize;
+    
+    // Get audio buffer list
     let audio_buffer_list = sample_buffer
         .get_audio_buffer_list()
         .context("Failed to get audio buffer list")?;
     
-    // Use current time as display time (ScreenCaptureKit handles timing)
+    // Get timing info
     let display_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64;
     
-    // Process buffers with better error handling
-    let mut all_audio_data = Vec::new();
-    let detected_sample_rate = 48000u32;
-    let mut detected_channels = 2u32;
-    let mut total_samples = 0u32;
-    
-    for buffer_index in 0..audio_buffer_list.num_buffers() {
-        let buffer = audio_buffer_list
-            .get(buffer_index)
-            .with_context(|| format!("Failed to get audio buffer {}", buffer_index))?;
+    // Handle different buffer layouts
+    match audio_buffer_list.num_buffers() {
+        0 => return Err(anyhow::anyhow!("No audio buffers found")),
         
-        let audio_data = buffer.data();
-        let buffer_channels = buffer.number_channels as u32;
-        
-        if audio_data.is_empty() {
-            continue;
+        1 => {
+            // Single interleaved buffer
+            let buffer = audio_buffer_list.get(0).context("Failed to get audio buffer")?;
+            let audio_data = buffer.data();
+            
+            if audio_data.is_empty() {
+                return Err(anyhow::anyhow!("Empty audio buffer"));
+            }
+            
+            // Validate buffer format
+            let buffer_channels = buffer.number_channels as u32;
+            if buffer_channels != channel_count {
+                log::warn!(
+                    "Channel count mismatch. Format: {}, Buffer: {}",
+                    channel_count,
+                    buffer_channels
+                );
+            }
+            
+            // Calculate frame count
+            let bytes_per_frame = bytes_per_sample * channel_count as usize;
+            let sample_frames = audio_data.len() / bytes_per_frame;
+            
+            // Get a buffer from the pool
+            let mut combined_data = frame_pool.get_audio_buffer(audio_data.len());
+            combined_data.extend_from_slice(audio_data);
+            
+            Ok(AudioFrame {
+                display_time,
+                sample_rate,
+                channel_count,
+                sample_count: sample_frames as u32,
+                data: combined_data,
+                bits_per_sample,
+                source: AudioSource::System,
+            })
         }
         
-        // Update detected format from first valid buffer
-        if buffer_index == 0 {
-            detected_channels = buffer_channels;
+        2 => {
+            // Likely separate left/right channels
+            let left = audio_buffer_list.get(0).context("Failed to get left buffer")?;
+            let right = audio_buffer_list.get(1).context("Failed to get right buffer")?;
+            
+            if left.number_channels != 1 || right.number_channels != 1 {
+                return Err(anyhow::anyhow!("Expected mono buffers for stereo audio"));
+            }
+            
+            let left_data = left.data();
+            let right_data = right.data();
+            
+            if left_data.is_empty() || right_data.is_empty() {
+                return Err(anyhow::anyhow!("Empty channel buffer"));
+            }
+            
+            // Ensure equal buffer sizes
+            let samples_per_channel = left_data.len() / bytes_per_sample;
+            if left_data.len() != right_data.len() {
+                log::warn!(
+                    "Channel size mismatch. L: {}, R: {}",
+                    left_data.len(),
+                    right_data.len()
+                );
+            }
+            
+            // Get a buffer from the pool for interleaved data
+            let mut combined_data = frame_pool.get_audio_buffer(samples_per_channel * bytes_per_sample * 2);
+            
+            // Interleave channels
+            for i in 0..samples_per_channel {
+                let start = i * bytes_per_sample;
+                let end = start + bytes_per_sample;
+                
+                combined_data.extend_from_slice(&left_data[start..end]);
+                combined_data.extend_from_slice(&right_data[start..end]);
+            }
+            
+            Ok(AudioFrame {
+                display_time,
+                sample_rate,
+                channel_count: 2,
+                sample_count: samples_per_channel as u32,
+                data: combined_data,
+                bits_per_sample,
+                source: AudioSource::System,
+            })
         }
         
-        // Validate channel consistency
-        if buffer_channels != detected_channels {
-            println!("Warning: Channel count mismatch in buffer {}. Expected: {}, Got: {}", 
-                buffer_index, detected_channels, buffer_channels);
-        }
-        
-        // Process audio data with format validation
-        let bytes_per_sample = 4usize; // float32
-        let bytes_per_frame = bytes_per_sample * buffer_channels as usize;
-        
-        if audio_data.len() % bytes_per_frame != 0 {
-            println!("Warning: Audio buffer {} size not aligned to frame boundary", buffer_index);
-            // Align to frame boundary
-            let aligned_size = (audio_data.len() / bytes_per_frame) * bytes_per_frame;
-            all_audio_data.extend_from_slice(&audio_data[..aligned_size]);
-            total_samples += (aligned_size / bytes_per_frame) as u32;
-        } else {
-            all_audio_data.extend_from_slice(audio_data);
-            total_samples += (audio_data.len() / bytes_per_frame) as u32;
+        n => {
+            // Multi-channel audio
+            let mut max_samples = 0;
+            let mut channel_data = Vec::with_capacity(n as usize);
+            
+            for i in 0..n {
+                let buffer = audio_buffer_list
+                    .get(i)
+                    .with_context(|| format!("Failed to get buffer {}", i))?;
+                
+                let data = buffer.data();
+                if data.is_empty() {
+                    continue;
+                }
+                
+                let samples = data.len() / bytes_per_sample;
+                max_samples = max_samples.max(samples);
+                channel_data.push(data);
+            }
+            
+            // Get a buffer from the pool for interleaved data
+            let mut combined_data = frame_pool.get_audio_buffer(max_samples * bytes_per_sample * n as usize);
+            
+            // Interleave all channels
+            for sample_idx in 0..max_samples {
+                for channel in &channel_data {
+                    let start = sample_idx * bytes_per_sample;
+                    if start + bytes_per_sample <= channel.len() {
+                        combined_data.extend_from_slice(&channel[start..start + bytes_per_sample]);
+                    } else {
+                        // Pad missing samples with silence
+                        combined_data.extend_from_slice(&vec![0; bytes_per_sample]);
+                    }
+                }
+            }
+            
+            Ok(AudioFrame {
+                display_time,
+                sample_rate,
+                channel_count: n as u32,
+                sample_count: max_samples as u32,
+                data: combined_data,
+                bits_per_sample,
+                source: AudioSource::System,
+            })
         }
     }
-    
-    if all_audio_data.is_empty() {
-        return Err(anyhow::anyhow!("No audio data found in any buffer"));
-    }
-    
-    Ok(AudioFrame {
-        display_time,
-        sample_rate: detected_sample_rate,
-        channel_count: detected_channels,
-        sample_count: total_samples,
-        data: all_audio_data,
-        bits_per_sample: 32,
-        source: crate::frame::AudioSource::System,
-    })
 }
 
 /// Placeholder for microphone capture functionality

@@ -6,18 +6,20 @@ use scap::{
 };
 use std::{
     fs::File,
-    io::{BufWriter, Write},
+    io::{BufWriter, Write, stdout, stdin},
     time::{Duration, Instant},
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🪟🎬🎵 Window-Specific Video + Audio Recording");
     println!("==============================================");
+    println!("💡 This example demonstrates improved window capture with debugging");
 
     // Create output directory
     std::fs::create_dir_all("recordings")?;
     
     // Get all available targets (windows and displays)
+    println!("🔍 Discovering available capture targets...");
     let targets = get_all_targets()?;
     
     // Find windows (filter out displays and system windows)
@@ -32,6 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 !window.title.contains("Dock") &&
                 !window.title.contains("Desktop") &&
                 !window.title.contains("Wallpaper") &&
+                !window.title.contains("window_video_audio_recording") && // Don't capture ourselves
                 window.title.len() > 3
             } else {
                 false
@@ -40,27 +43,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     
     if windows.is_empty() {
-        println!("❌ No suitable windows found to capture. Please open some applications with named windows.");
+        println!("❌ No suitable windows found to capture.");
+        println!("💡 To fix this:");
+        println!("   • Open some applications (Safari, Terminal, TextEdit, etc.)");
+        println!("   • Make sure the windows have titles and are visible");
+        println!("   • Ensure you have screen recording permissions");
         return Ok(());
     }
     
-    println!("🪟 Available windows:");
+    println!("\n🪟 Available windows for capture:");
     for (i, target) in windows.iter().enumerate() {
         if let Target::Window(window) = target {
-            println!("   {}. {} (ID: {})", i + 1, window.title, window.id);
+            println!("   {}. \"{}\" (ID: {})", i + 1, window.title, window.id);
         }
     }
     
-    // For demo, let's use the first suitable window, but in practice you'd let user choose
-    let selected_window = windows[0].clone();
+    // Let user choose a window
+    print!("\n🎯 Select window number (1-{}): ", windows.len());
+    stdout().flush()?;
+    
+    let mut input = String::new();
+    stdin().read_line(&mut input)?;
+    
+    let choice: usize = input.trim().parse().unwrap_or(1);
+    let selected_window = windows.get(choice.saturating_sub(1))
+        .unwrap_or(&windows[0])
+        .clone();
     
     if let Target::Window(window) = &selected_window {
-        println!("\n🎯 Selected window: \"{}\"", window.title);
+        println!("✅ Selected window: \"{}\" (ID: {})", window.title, window.id);
     }
     
     // Configure for window-specific video + audio recording
     let mut options = Options::default();
-    options.target = Some(selected_window); // Capture specific window
+    options.target = Some(selected_window.clone()); // Capture specific window
     options.output_type = FrameType::BGRAFrame;
     options.fps = 30;
     
@@ -71,14 +87,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     options.audio_channel_count = Some(2); // Stereo
     
     println!("\n📹 Recording Configuration:");
+    if let Target::Window(window) = &selected_window {
+        println!("   🪟 Target: \"{}\"", window.title);
+    }
     println!("   🎥 Video: Window content @ 30 FPS");
-    println!("   🔊 System Audio: 48kHz stereo from window");
+    println!("   🔊 System Audio: 48kHz stereo");
     println!("   ⚠️  Note: Audio includes all system audio, not just the window");
-    println!("   💡 Tip: For best results, focus on the target window and play media");
     
-    let mut capturer = Capturer::build(options)?;
+    println!("\n🔧 Creating capturer...");
+    let mut capturer = match Capturer::build(options) {
+        Ok(c) => {
+            println!("✅ Capturer created successfully!");
+            c
+        }
+        Err(e) => {
+            println!("❌ Failed to create capturer: {}", e);
+            println!("\n🔧 Troubleshooting tips:");
+            println!("   • Make sure the selected window is still open and visible");
+            println!("   • Check that you have screen recording permissions:");
+            println!("     System Preferences → Security & Privacy → Privacy → Screen Recording");
+            println!("   • Try selecting a different window");
+            println!("   • The window might not support ScreenCaptureKit capture");
+            println!("   • Consider using display capture instead of window capture");
+            
+            // Show some debug info about the selected window
+            if let Target::Window(window) = &selected_window {
+                println!("\n🔍 Debug info for selected window:");
+                println!("   Title: \"{}\"", window.title);
+                println!("   ID: {}", window.id);
+                println!("   Raw Handle: {:?}", window.raw_handle);
+            }
+            
+            return Err(e.into());
+        }
+    };
 
     println!("\n🔴 Starting window video + audio capture...");
+    println!("💡 The capture will include detailed debug information");
+    
     capturer.start_capture();
 
     // Record for 8 seconds to get good samples
@@ -87,6 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     println!("📸 Recording {} seconds of window video + audio...", recording_duration.as_secs());
     println!("   💡 Try interacting with the window or playing media in it!");
+    println!("   🔍 Watch for debug messages in the output");
     
     let mut video_frames = Vec::new();
     let mut audio_frames = Vec::new();
@@ -109,8 +156,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(_) => {
                 // Handle other frame types if needed
             }
-            Err(_) => {
-                // Continue trying
+            Err(e) => {
+                // Show error but continue trying
+                if last_progress_time.elapsed() >= Duration::from_secs(2) {
+                    println!("   ⚠️  Frame capture error: {}", e);
+                }
             }
         }
         
@@ -130,6 +180,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n💾 Saving captured data...");
     println!("   📊 Total: {} video frames, {} audio frames", video_frame_count, audio_frame_count);
     
+    // Analyze the results
+    if video_frame_count == 0 && audio_frame_count == 0 {
+        println!("\n❌ No data was captured!");
+        println!("🔧 This suggests:");
+        println!("   • The window capture failed completely");
+        println!("   • Screen recording permissions may not be granted");
+        println!("   • The selected window may not be capturable");
+        println!("   • Check the debug messages above for more details");
+    } else if video_frame_count == 0 {
+        println!("\n⚠️  Only audio was captured, no video frames");
+        println!("🔧 This suggests:");
+        println!("   • Window video capture failed but system audio worked");
+        println!("   • The window may be minimized or occluded");
+        println!("   • Try keeping the window visible and active during capture");
+    } else if audio_frame_count == 0 {
+        println!("\n⚠️  Only video was captured, no audio frames");
+        println!("🔧 This suggests:");
+        println!("   • Window video capture worked but audio capture failed");
+        println!("   • Audio permissions may not be granted");
+        println!("   • Try playing some audio during capture");
+    } else {
+        println!("\n🎉 Success! Both video and audio were captured!");
+    }
+    
     // Save video info (just metadata for now)
     if !video_frames.is_empty() {
         let first_frame = &video_frames[0];
@@ -142,6 +216,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         writer.write_all(&first_frame.data)?;
         writer.flush()?;
         println!("   ✅ Sample video frame saved to recordings/window_video_sample.raw");
+        
+        // Calculate average frame rate
+        let actual_fps = video_frame_count as f64 / recording_duration.as_secs_f64();
+        println!("   📈 Actual video frame rate: {:.1} FPS (target: 30 FPS)", actual_fps);
+        
+        if actual_fps < 15.0 {
+            println!("   ⚠️  Low frame rate detected - this may indicate performance issues");
+        }
     }
     
     // Save audio data
@@ -158,21 +240,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         
         println!("   🔊 Audio: {} bytes saved to recordings/window_audio.raw", all_audio_data.len());
         
+        // Calculate audio statistics
+        let audio_duration = all_audio_data.len() as f64 / (48000.0 * 2.0 * 4.0); // 48kHz, stereo, 32-bit float
+        println!("   📈 Audio duration: {:.1} seconds", audio_duration);
+        
         // Create conversion command
         println!("\n🔧 To convert audio to WAV:");
         println!("ffmpeg -f f32le -ar 48000 -ac 2 -i recordings/window_audio.raw recordings/window_audio.wav -y");
     }
     
     if video_frame_count > 0 && audio_frame_count > 0 {
-        println!("\n🎉 Success! Window video + audio capture completed!");
-        println!("   📈 Capture rate: {:.1} video FPS, {:.1} audio frames/sec", 
+        println!("\n🎉 Window capture test completed successfully!");
+        println!("   📈 Capture rates: {:.1} video FPS, {:.1} audio frames/sec", 
             video_frame_count as f64 / recording_duration.as_secs_f64(),
             audio_frame_count as f64 / recording_duration.as_secs_f64());
+        println!("   💡 The improved error handling and debugging should help identify any issues");
     } else {
-        println!("\n⚠️  Warning: Limited data captured. Try:");
-        println!("   • Ensuring the target window is visible and active");
-        println!("   • Playing media or making noise during capture");
-        println!("   • Checking system audio permissions");
+        println!("\n⚠️  Partial or failed capture detected");
+        println!("   📋 Check the debug output above for specific error messages");
+        println!("   💡 Try the suggestions provided for troubleshooting");
     }
     
     Ok(())

@@ -1,9 +1,10 @@
-use std::sync::mpsc;
-
+use std::sync::Arc;
 use anyhow::Result;
+use tokio::sync::Mutex;
 
 use super::Options;
 use crate::frame::Frame;
+use crate::capturer::{async_frame::AsyncFrameSender, frame_pool::FramePool};
 
 #[cfg(target_os = "macos")]
 pub mod mac;
@@ -42,11 +43,13 @@ pub fn get_output_frame_size(options: &Options) -> [u32; 2] {
 
 pub struct Engine {
     options: Options,
+    frame_sender: AsyncFrameSender,
+    frame_pool: Arc<FramePool>,
 
     #[cfg(target_os = "macos")]
     mac: screencapturekit::stream::SCStream,
     #[cfg(target_os = "macos")]
-    error_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    error_flag: Arc<std::sync::atomic::AtomicBool>,
 
     #[cfg(target_os = "windows")]
     win: win::WCStream,
@@ -56,54 +59,50 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn new(options: &Options, tx: mpsc::Sender<Result<ChannelItem>>) -> Result<Engine> {
+    pub fn new(options: Options, frame_sender: AsyncFrameSender, frame_pool: Arc<FramePool>) -> Result<Self> {
         #[cfg(target_os = "macos")]
         {
-            let error_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            // Create a wrapper channel that converts ChannelItem to Result<ChannelItem>
-            let (inner_tx, inner_rx) = mpsc::channel::<ChannelItem>();
-            let tx_clone = tx.clone();
-            std::thread::spawn(move || {
-                while let Ok(item) = inner_rx.recv() {
-                    if tx_clone.send(Ok(item)).is_err() {
-                        break;
-                    }
-                }
-            });
-            let mac = mac::create_capturer(options, inner_tx, error_flag.clone())
-                .map_err(|e| anyhow::anyhow!("Failed to create capturer: {:?}", e))?;
-
-            Ok(Engine {
+            let error_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let mac = mac::create_stream(&options, frame_sender.clone(), Arc::clone(&error_flag), Arc::clone(&frame_pool))?;
+            
+            Ok(Self {
+                options,
+                frame_sender,
+                frame_pool,
                 mac,
                 error_flag,
-                options: (*options).clone(),
             })
         }
 
         #[cfg(target_os = "windows")]
         {
-            let win = win::create_capturer(&options, tx);
-            Ok(Engine {
+            let win = win::WCStream::new(&options, frame_sender.clone(), Arc::clone(&frame_pool))?;
+            
+            Ok(Self {
+                options,
+                frame_sender,
+                frame_pool,
                 win,
-                options: (*options).clone(),
             })
         }
 
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         {
-            let linux = linux::create_capturer(&options, tx)?;
-            Ok(Engine {
+            let linux = linux::LinuxCapturer::new(&options, frame_sender.clone(), Arc::clone(&frame_pool))?;
+            
+            Ok(Self {
+                options,
+                frame_sender,
+                frame_pool,
                 linux,
-                options: (*options).clone(),
             })
         }
     }
 
-    pub fn start(&mut self) {
+    pub async fn start_capture(&mut self) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            // self.mac.add_output(Capturer::new(tx));
-            self.mac.start_capture().expect("Failed to start capture");
+            self.mac.start_capture().map_err(|e| anyhow::anyhow!("Failed to start capture: {}", e))?;
         }
 
         #[cfg(target_os = "windows")]
@@ -113,14 +112,16 @@ impl Engine {
 
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         {
-            self.linux.imp.start_capture();
+            self.linux.start_capture();
         }
+
+        Ok(())
     }
 
-    pub fn stop(&mut self) {
+    pub async fn stop_capture(&mut self) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            self.mac.stop_capture().expect("Failed to stop capture");
+            self.mac.stop_capture().map_err(|e| anyhow::anyhow!("Failed to stop capture: {}", e))?;
         }
 
         #[cfg(target_os = "windows")]
@@ -130,18 +131,20 @@ impl Engine {
 
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         {
-            self.linux.imp.stop_capture();
+            self.linux.stop_capture();
         }
+
+        Ok(())
     }
 
     pub fn get_output_frame_size(&mut self) -> [u32; 2] {
         get_output_frame_size(&self.options)
     }
 
-    pub fn process_channel_item(&self, data: ChannelItem) -> Option<Frame> {
+    pub async fn process_channel_item(&self, data: ChannelItem) -> Option<Frame> {
         #[cfg(target_os = "macos")]
         {
-            mac::process_sample_buffer(data.0, data.1, self.options.output_type)
+            mac::process_sample_buffer(data.0, data.1, self.options.output_type, &self.frame_pool)
         }
         #[cfg(not(target_os = "macos"))]
         Some(data)

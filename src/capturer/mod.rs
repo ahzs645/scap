@@ -1,6 +1,9 @@
 pub mod engine;
 
 use std::{error::Error, sync::mpsc};
+use std::sync::Arc;
+use anyhow::Result;
+use tokio::sync::Mutex;
 
 use anyhow::anyhow;
 
@@ -13,6 +16,16 @@ use crate::{
 };
 
 pub use engine::get_output_frame_size;
+
+mod async_frame;
+mod engine;
+mod frame_pool;
+mod error_recovery;
+
+pub use engine::Engine;
+use async_frame::{AsyncFrameReceiver, AsyncFrameSender, CaptureState};
+pub use frame_pool::FramePool;
+pub use error_recovery::{ErrorRecovery, ErrorRecoveryConfig};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub enum Resolution {
@@ -45,15 +58,16 @@ impl Resolution {
 
 #[derive(Debug, Default, Clone)]
 pub struct Point {
-    pub x: f64,
-    pub y: f64,
+    pub x: i32,
+    pub y: i32,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct Size {
-    pub width: f64,
-    pub height: f64,
+    pub width: i32,
+    pub height: i32,
 }
+
 #[derive(Debug, Default, Clone)]
 pub struct Area {
     pub origin: Point,
@@ -129,8 +143,11 @@ impl Default for Options {
 
 /// Screen capturer class
 pub struct Capturer {
-    engine: engine::Engine,
-    rx: mpsc::Receiver<anyhow::Result<ChannelItem>>,
+    engine: Engine,
+    frame_receiver: AsyncFrameReceiver,
+    state: Arc<Mutex<CaptureState>>,
+    frame_pool: Arc<FramePool>,
+    error_recovery: ErrorRecovery,
 }
 
 #[derive(Debug)]
@@ -159,48 +176,99 @@ impl Capturer {
         note = "Use `build` instead of `new` to create a new capturer instance."
     )]
     pub fn new(options: Options) -> anyhow::Result<Capturer> {
-        let (tx, rx) = mpsc::channel();
-        let engine = engine::Engine::new(&options, tx)?;
-
-        Ok(Capturer { engine, rx })
+        let (frame_receiver, frame_sender) = AsyncFrameReceiver::new(32); // Buffer size of 32 frames
+        let state = Arc::new(Mutex::new(CaptureState::Idle));
+        
+        let engine = Engine::new(options, frame_sender)?;
+        
+        Ok(Self {
+            engine,
+            frame_receiver,
+            state: state.clone(),
+        })
     }
 
     /// Build a new [Capturer] instance with the provided options
-    pub fn build(options: Options) -> anyhow::Result<Capturer> {
-        if !is_supported() {
-            return Err(anyhow!(CapturerBuildError::NotSupported));
-        }
-
-        if !has_permission() {
-            return Err(anyhow!(CapturerBuildError::PermissionNotGranted));
-        }
-
-        let (tx, rx) = mpsc::channel();
-        let engine = engine::Engine::new(&options, tx)?;
-
-        Ok(Capturer { engine, rx })
+    pub fn build(options: Options) -> Result<Self> {
+        let (frame_receiver, frame_sender) = AsyncFrameReceiver::new(32); // Buffer size of 32 frames
+        let state = Arc::new(Mutex::new(CaptureState::Idle));
+        let frame_pool = Arc::new(FramePool::new(10)); // Pool size of 10 buffers
+        let error_recovery = ErrorRecovery::new(Arc::clone(&state), None);
+        
+        let engine = Engine::new(options, frame_sender, Arc::clone(&frame_pool))?;
+        
+        Ok(Self {
+            engine,
+            frame_receiver,
+            state: Arc::clone(&state),
+            frame_pool,
+            error_recovery,
+        })
     }
 
-    // TODO
-    // Prevent starting capture if already started
     /// Start capturing the frames
-    pub fn start_capture(&mut self) {
-        self.engine.start();
+    pub async fn start_capture(&mut self) {
+        {
+            let mut state = self.state.lock().await;
+            *state = CaptureState::Starting;
+        }
+        
+        if let Err(e) = self.engine.start_capture().await {
+            log::error!("Failed to start capture: {}", e);
+            if !self.error_recovery.handle_error(&e.to_string()).await {
+                return;
+            }
+        }
+        
+        {
+            let mut state = self.state.lock().await;
+            *state = CaptureState::Running;
+        }
     }
 
     /// Stop the capturer
-    pub fn stop_capture(&mut self) {
-        self.engine.stop();
+    pub async fn stop_capture(&mut self) {
+        {
+            let mut state = self.state.lock().await;
+            *state = CaptureState::Stopping;
+        }
+        
+        if let Err(e) = self.engine.stop_capture().await {
+            log::error!("Failed to stop capture: {}", e);
+        }
+        
+        {
+            let mut state = self.state.lock().await;
+            *state = CaptureState::Idle;
+        }
     }
 
     /// Get the next captured frame
-    pub fn get_next_frame(&self) -> anyhow::Result<Frame> {
-        loop {
-            let res = self.rx.recv()??;
-
-            if let Some(frame) = self.engine.process_channel_item(res) {
-                return Ok(frame);
+    pub async fn get_next_frame(&mut self) -> Result<Frame> {
+        match self.frame_receiver.next_frame().await {
+            Some(frame) => {
+                match &frame {
+                    Ok(frame) => {
+                        // Return buffers to pool after frame is processed
+                        match frame {
+                            Frame::RGB(f) | Frame::BGR0(f) | Frame::BGRA(f) => {
+                                self.frame_pool.return_video_buffer(f.data.clone());
+                            }
+                            Frame::SystemAudio(f) | Frame::MicrophoneAudio(f) => {
+                                self.frame_pool.return_audio_buffer(f.data.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err(e) => {
+                        if !self.error_recovery.handle_error(&e.to_string()).await {
+                            return Err(anyhow::anyhow!("Max retry attempts reached"));
+                        }
+                    }
+                }
+                frame
             }
+            None => Err(anyhow::anyhow!("Frame channel closed")),
         }
     }
 
@@ -212,8 +280,41 @@ impl Capturer {
     pub fn raw(&self) -> RawCapturer {
         RawCapturer { capturer: self }
     }
+
+    pub async fn get_state(&self) -> CaptureState {
+        self.state.lock().await.clone()
+    }
 }
 
 pub struct RawCapturer<'a> {
     capturer: &'a Capturer,
+}
+
+impl RawCapturer<'_> {
+    #[cfg(target_os = "macos")]
+    pub fn get_next_pixel_buffer(&self) -> Result<PixelBuffer, Box<dyn std::error::Error>> {
+        use std::time::Duration;
+
+        let capturer = &self.capturer;
+
+        loop {
+            let error_flag = capturer
+                .engine
+                .error_flag
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if error_flag {
+                return Err("Capture error occurred".into());
+            }
+
+            let res = match capturer.rx.recv_timeout(Duration::from_millis(10)) {
+                Ok(v) => v,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Err("Channel disconnected".into()),
+            };
+
+            if let Some(frame) = PixelBuffer::from_channel_item(res?) {
+                return Ok(frame);
+            }
+        }
+    }
 }
