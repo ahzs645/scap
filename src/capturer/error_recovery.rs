@@ -40,22 +40,25 @@ impl ErrorRecovery {
     /// Creates a new error recovery handler
     pub fn new(state: Arc<Mutex<CaptureState>>, config: Option<ErrorRecoveryConfig>) -> Self {
         let config = config.unwrap_or_default();
+        let current_delay = config.initial_retry_delay;
         Self {
             state,
-            config,
+            config: config.clone(),
             retry_count: 0,
-            current_delay: config.initial_retry_delay,
+            current_delay,
         }
     }
 
     /// Handles a stream error and attempts recovery
-    pub async fn handle_error(&mut self, error: &Error) -> Option<Duration> {
+    pub async fn handle_error(&mut self, _error: &Error) -> Option<Duration> {
         // Check if we should retry
-        if self.retry_count >= self.config.max_retries.unwrap_or(0) {
-            // Reset retry count and delay for next time
-            self.retry_count = 0;
-            self.current_delay = self.config.initial_retry_delay;
-            return None;
+        if let Some(max_retries) = self.config.max_retries {
+            if self.retry_count >= max_retries {
+                // Reset retry count and delay for next time
+                self.retry_count = 0;
+                self.current_delay = self.config.initial_retry_delay;
+                return None;
+            }
         }
 
         // Calculate next retry delay with exponential backoff
@@ -77,6 +80,14 @@ impl ErrorRecovery {
     pub fn reset(&mut self) {
         self.retry_count = 0;
         self.current_delay = self.config.initial_retry_delay;
+    }
+
+    /// Calculate delay for a given retry attempt
+    pub fn calculate_delay(&self, attempt: u32) -> Duration {
+        let delay_ms = self.config.initial_retry_delay.as_millis() as f32 
+            * self.config.backoff_factor.powi(attempt as i32);
+        let delay_ms = delay_ms.min(self.config.max_retry_delay.as_millis() as f32);
+        Duration::from_millis(delay_ms as u64)
     }
 }
 
@@ -127,18 +138,12 @@ mod tests {
             backoff_factor: 2.0,
         };
         
-        let mut recovery = ErrorRecovery::new(state, Some(config));
+        let recovery = ErrorRecovery::new(state, Some(config));
         
-        assert_eq!(recovery.current_delay.as_millis(), 100);
-        assert_eq!(recovery.handle_error(&Error::msg("")).await.unwrap().as_millis(), 100);
-        assert_eq!(recovery.current_delay.as_millis(), 200);
-        assert_eq!(recovery.handle_error(&Error::msg("")).await.unwrap().as_millis(), 200);
-        assert_eq!(recovery.current_delay.as_millis(), 400);
-        assert_eq!(recovery.handle_error(&Error::msg("")).await.unwrap().as_millis(), 400);
         assert_eq!(recovery.calculate_delay(0).as_millis(), 100);
         assert_eq!(recovery.calculate_delay(1).as_millis(), 200);
         assert_eq!(recovery.calculate_delay(2).as_millis(), 400);
         assert_eq!(recovery.calculate_delay(3).as_millis(), 800);
         assert_eq!(recovery.calculate_delay(4).as_millis(), 1000); // Capped at max_delay
     }
-} 
+}

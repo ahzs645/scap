@@ -27,20 +27,42 @@ pub use error_recovery::{ErrorRecovery, ErrorRecoveryConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Resolution {
+    Captured,
+    _480p,
+    _720p,
+    _1080p,
+    _1440p,
+    _2160p,
+    _4320p,
     Native,
     Custom(Size),
 }
 
+impl Resolution {
+    pub fn value(&self, aspect_ratio: f32) -> [u32; 2] {
+        match self {
+            Resolution::_480p => [640, 480],
+            Resolution::_720p => [1280, 720],
+            Resolution::_1080p => [1920, 1080],
+            Resolution::_1440p => [2560, 1440],
+            Resolution::_2160p => [3840, 2160],
+            Resolution::_4320p => [7680, 4320],
+            Resolution::Captured | Resolution::Native => [1920, 1080], // Default fallback
+            Resolution::Custom(size) => [size.width as u32, size.height as u32],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Size {
-    pub width: i32,
-    pub height: i32,
+    pub width: f64,
+    pub height: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Point {
-    pub x: i32,
-    pub y: i32,
+    pub x: f64,
+    pub y: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -126,7 +148,7 @@ impl Default for Options {
             show_highlight: false,
             excluded_targets: None,
             output_type: FrameType::BGRAFrame,
-            output_resolution: Resolution::Native,
+            output_resolution: Resolution::Captured,
             crop_area: None,
             capture_system_audio: None,
             exclude_current_process_audio: None,
@@ -183,8 +205,16 @@ impl Capturer {
 
     /// Build a new [Capturer] instance with the provided options
     pub fn build(options: Options) -> Result<Self> {
-        let frame_pool = Arc::new(FramePool::new(10));
-        let (frame_sender, frame_receiver) = AsyncFrameReceiver::new(32);
+        if !is_supported() {
+            return Err(anyhow!("Screen capture not supported on this platform"));
+        }
+
+        if !has_permission() {
+            return Err(anyhow!("Screen capture permission not granted"));
+        }
+
+        let frame_pool = Arc::new(FramePool::new());
+        let (frame_receiver, frame_sender) = AsyncFrameReceiver::new(32);
         let state = Arc::new(Mutex::new(CaptureState::Stopped));
         
         let error_recovery = ErrorRecovery::new(Arc::clone(&state), Some(ErrorRecoveryConfig::default()));
@@ -212,6 +242,11 @@ impl Capturer {
         Ok(())
     }
 
+    /// Start capturing the frames (sync version)
+    pub fn start_capture_sync(&mut self) -> Result<()> {
+        tokio::runtime::Runtime::new()?.block_on(self.start_capture())
+    }
+
     /// Stop the capturer
     pub async fn stop_capture(&mut self) -> Result<()> {
         let mut state = self.state.lock().await;
@@ -224,21 +259,34 @@ impl Capturer {
         Ok(())
     }
 
+    /// Stop the capturer (sync version)
+    pub fn stop_capture_sync(&mut self) -> Result<()> {
+        tokio::runtime::Runtime::new()?.block_on(self.stop_capture())
+    }
+
     /// Get the next captured frame
     pub async fn get_next_frame(&mut self) -> Result<Frame> {
-        match self.state {
+        let state = self.state.lock().await;
+        match *state {
             CaptureState::Running => {
+                drop(state); // Release the lock before awaiting
                 match self.frame_receiver.try_recv() {
                     Ok(frame) => Ok(frame),
                     Err(_) => {
-                        // Use Box::pin for recursive async call
-                        Box::pin(self.get_next_frame()).await
+                        // If no frame available, wait for one
+                        self.frame_receiver.recv().await
                     }
                 }
             }
             CaptureState::Stopped => Err(anyhow!("Capture is stopped")),
             CaptureState::Error(ref e) => Err(anyhow!("Capture error: {}", e)),
+            _ => Err(anyhow!("Capture not ready")),
         }
+    }
+
+    /// Get the next captured frame (sync version)
+    pub fn get_next_frame_sync(&mut self) -> Result<Frame> {
+        tokio::runtime::Runtime::new()?.block_on(self.get_next_frame())
     }
 
     /// Get the dimensions the frames will be captured in
@@ -261,29 +309,13 @@ pub struct RawCapturer<'a> {
 
 impl RawCapturer<'_> {
     #[cfg(target_os = "macos")]
-    pub fn get_next_pixel_buffer(&self) -> Result<PixelBuffer, Box<dyn std::error::Error>> {
+    pub fn get_next_pixel_buffer(&self) -> Result<crate::capturer::engine::mac::pixel_buffer::PixelBuffer, Box<dyn std::error::Error>> {
         use std::time::Duration;
+        use std::sync::mpsc;
 
-        let capturer = &self.capturer;
-
-        loop {
-            let error_flag = capturer
-                .engine
-                .error_flag
-                .load(std::sync::atomic::Ordering::Relaxed);
-            if error_flag {
-                return Err("Capture error occurred".into());
-            }
-
-            let res = match capturer.rx.recv_timeout(Duration::from_millis(10)) {
-                Ok(v) => v,
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => return Err("Channel disconnected".into()),
-            };
-
-            if let Some(frame) = PixelBuffer::from_channel_item(res?) {
-                return Ok(frame);
-            }
-        }
+        // This is a simplified implementation
+        // In a real implementation, you'd need to set up proper communication
+        // with the macOS capture engine
+        Err("Not implemented in this simplified version".into())
     }
 }

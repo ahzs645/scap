@@ -128,4 +128,4 @@ mod tests {
         assert_eq!(buffer3.capacity(), 1024);
         assert_eq!(buffer4.capacity(), 2048);
     }
-} 
+}

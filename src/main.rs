@@ -2,9 +2,8 @@
 // Refer to `lib.rs` for the library source code
 
 use scap::{
-    capturer::{Area, Capturer, Options, Point, Size},
-    frame::Frame
-    ,
+    capturer::{Area, Capturer, Options, Point, Size, Resolution},
+    frame::Frame,
 };
 use std::process;
 
@@ -25,8 +24,26 @@ fn main() {
         }
     }
 
-    // // Get recording targets
-    // let targets = scap::get_all_targets();
+    // Get recording targets
+    let targets = scap::get_all_targets();
+    match targets {
+        Ok(targets) => {
+            println!("Found {} capture targets", targets.len());
+            for (i, target) in targets.iter().enumerate() {
+                match target {
+                    scap::Target::Display(display) => {
+                        println!("  Display {}: {} ({}x{})", i, display.title, display.width, display.height);
+                    }
+                    scap::Target::Window(window) => {
+                        println!("  Window {}: {} ({}x{})", i, window.title, window.width, window.height);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            println!("Failed to get targets: {}", e);
+        }
+    }
 
     // Create Options
     let options = Options {
@@ -35,7 +52,7 @@ fn main() {
         show_highlight: true,
         excluded_targets: None,
         output_type: scap::frame::FrameType::BGRAFrame,
-        output_resolution: scap::capturer::Resolution::_720p,
+        output_resolution: Resolution::_720p,
         crop_area: Some(Area {
             origin: Point { x: 0.0, y: 0.0 },
             size: Size {
@@ -53,17 +70,27 @@ fn main() {
     });
 
     // Start Capture
-    recorder.start_capture();
+    println!("Starting capture...");
+    if let Err(e) = recorder.start_capture_sync() {
+        println!("Failed to start capture: {}", e);
+        return;
+    }
 
     // Capture 100 frames
     let mut start_time: u64 = 0;
     for i in 0..100 {
-        let frame = recorder.get_next_frame().expect("Error");
+        let frame = match recorder.get_next_frame_sync() {
+            Ok(frame) => frame,
+            Err(e) => {
+                println!("Error getting frame {}: {}", i, e);
+                continue;
+            }
+        };
 
         match frame {
             Frame::YUVFrame(frame) => {
                 println!(
-                    "Recieved YUV frame {} of width {} and height {} and pts {}",
+                    "Received YUV frame {} of width {} and height {} and pts {}",
                     i, frame.width, frame.height, frame.display_time
                 );
             }
@@ -78,7 +105,7 @@ fn main() {
                     start_time = frame.display_time;
                 }
                 println!(
-                    "Recieved RGB frame {} of width {} and height {} and time {}",
+                    "Received RGB frame {} of width {} and height {} and time {}",
                     i,
                     frame.width,
                     frame.height,
@@ -102,7 +129,7 @@ fn main() {
                     start_time = frame.display_time;
                 }
                 println!(
-                    "Recieved BGRA frame {} of width {} and height {} and time {}",
+                    "Received BGRA frame {} of width {} and height {} and time {}",
                     i,
                     frame.width,
                     frame.height,
@@ -113,5 +140,10 @@ fn main() {
     }
 
     // Stop Capture
-    recorder.stop_capture();
+    println!("Stopping capture...");
+    if let Err(e) = recorder.stop_capture_sync() {
+        println!("Failed to stop capture: {}", e);
+    }
+    
+    println!("Capture completed successfully!");
 }
