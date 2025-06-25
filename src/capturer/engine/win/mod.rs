@@ -61,7 +61,7 @@ impl GraphicsCaptureApiHandler for Capturer {
                     .buffer_crop(start_x, start_y, end_x, end_y)
                     .expect("Failed to crop buffer");
 
-                // get raw frame buffer - use the correct method name
+                // Fix: Use the correct method name
                 let raw_frame_buffer = match cropped_buffer.as_nopadding_buffer() {
                     Ok(buffer) => buffer,
                     Err(_) => return Err(("Failed to get raw buffer").into()),
@@ -161,26 +161,34 @@ pub fn create_capturer(options: &Options, tx: AsyncFrameSender) -> anyhow::Resul
     };
 
     let settings = match target {
-        Target::Display(display) => Settings::Display(WCSettings::new(
-            WCMonitor::from_raw_hmonitor(display.raw_handle.0),
-            show_cursor,
-            DrawBorderSettings::Default,
-            color_format,
-            FlagStruct {
-                tx: sync_tx,
-                crop: Some(get_crop_area(options)),
-            },
-        )),
-        Target::Window(window) => Settings::Window(WCSettings::new(
-            WCWindow::from_raw_hwnd(window.raw_handle.0),
-            show_cursor,
-            DrawBorderSettings::Default,
-            color_format,
-            FlagStruct {
-                tx: sync_tx,
-                crop: Some(get_crop_area(options)),
-            },
-        )),
+        Target::Display(display) => {
+            // Fix: Handle the raw_handle properly for HMONITOR
+            let monitor = WCMonitor::from_raw_hmonitor(display.raw_handle.0 as isize);
+            Settings::Display(WCSettings::new(
+                monitor,
+                show_cursor,
+                DrawBorderSettings::Default,
+                color_format,
+                FlagStruct {
+                    tx: sync_tx,
+                    crop: Some(get_crop_area(options)),
+                },
+            ))
+        },
+        Target::Window(window) => {
+            // Fix: Handle the raw_handle properly for HWND
+            let win = WCWindow::from_raw_hwnd(window.raw_handle.0 as isize);
+            Settings::Window(WCSettings::new(
+                win,
+                show_cursor,
+                DrawBorderSettings::Default,
+                color_format,
+                FlagStruct {
+                    tx: sync_tx,
+                    crop: Some(get_crop_area(options)),
+                },
+            ))
+        },
     };
 
     Ok(WCStream {

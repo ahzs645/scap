@@ -26,60 +26,81 @@ fn get_display_name(display_id: CGDirectDisplayID) -> String {
                     .into_owned();
             }
         }
-
-        format!("Unknown Display {}", display_id)
+        format!("Display {}", display_id)
     }
 }
 
 pub fn get_all_targets() -> Result<Vec<Target>> {
     let mut targets = Vec::new();
 
-    let content = screencapturekit::shareable_content::SCShareableContent::get()?;
-    
-    // Add displays
-    for (index, display) in content.displays().iter().enumerate() {
-        let frame = display.get_frame();
-        targets.push(Target::Display(Display {
-            id: index as u32,
-            title: format!("Display {}", index + 1),
-            width: frame.size.width as u64,
-            height: frame.size.height as u64,
-            raw_handle: index as u32,
-        }));
-    }
+    // Get all displays
+    unsafe {
+        let screens: id = NSScreen::screens(nil);
+        let count: u64 = msg_send![screens, count];
 
-    // Add windows
-    for (index, window) in content.windows().iter().enumerate() {
-        if is_window_capturable(window, index) {
-            let frame = window.get_frame();
-            let title = window.title();
-            
-            let app = window.owning_application();
-            let app_name = app.application_name().unwrap_or_else(|| "Unknown".to_string());
-            let app_bundle_id = app.bundle_identifier().unwrap_or_else(|| "Unknown".to_string());
-            let process_id = app.process_id();
+        for i in 0..count {
+            let screen: id = msg_send![screens, objectAtIndex: i];
+            let device_description: id = msg_send![screen, deviceDescription];
+            let display_id_number: id = msg_send![device_description, objectForKey: NSString::alloc(nil).init_str("NSScreenNumber")];
+            let display_id_number: u32 = msg_send![display_id_number, unsignedIntValue];
 
-            targets.push(Target::Window(Window {
-                id: index as u32,
-                title,
+            let frame = unsafe { NSScreen::frame(screen) };
+            targets.push(Target::Display(Display {
+                id: display_id_number,
+                title: get_display_name(display_id_number),
                 width: frame.size.width as u64,
                 height: frame.size.height as u64,
-                app_name,
-                app_bundle_id,
-                is_on_screen: window.is_on_screen(),
-                process_id,
-                window_level: window.window_layer() as i32,
-                has_shadow: true,
-                is_transparent: false,
-                raw_handle: index as u32,
+                raw_handle: display_id_number,
             }));
         }
+    }
+
+    // Get all windows
+    let content = screencapturekit::shareable_content::SCShareableContent::get().map_err(|e| anyhow::anyhow!("Failed to get shareable content: {}", e))?;
+    for window in content.windows() {
+        if !is_window_capturable(&window) {
+            continue;
+        }
+
+        let frame = window.get_frame();
+        let app = window.owning_application();
+        targets.push(Target::Window(Window {
+            id: window.window_id(),
+            title: window.title(),
+            width: frame.size.width as u64,
+            height: frame.size.height as u64,
+            app_name: app.application_name(),
+            app_bundle_id: app.bundle_identifier(),
+            is_on_screen: window.is_on_screen(),
+            process_id: app.process_id() as u32,
+            window_level: window.window_layer() as i32,
+            has_shadow: true,
+            is_transparent: false,
+            raw_handle: window.window_id(),
+        }));
     }
 
     Ok(targets)
 }
 
-fn is_window_capturable(window: &screencapturekit::shareable_content::window::SCWindow, _index: usize) -> bool {
+pub fn get_primary_target() -> Result<Target> {
+    let display_id = unsafe { CGMainDisplayID() };
+    let title = get_display_name(display_id);
+
+    let screens: id = unsafe { NSScreen::screens(nil) };
+    let screen: id = unsafe { msg_send![screens, objectAtIndex: 0] };
+    let frame = unsafe { NSScreen::frame(screen) };
+
+    Ok(Target::Display(Display {
+        id: display_id,
+        title,
+        width: frame.size.width as u64,
+        height: frame.size.height as u64,
+        raw_handle: display_id,
+    }))
+}
+
+fn is_window_capturable(window: &screencapturekit::shareable_content::window::SCWindow) -> bool {
     if !window.is_on_screen() {
         return false;
     }
@@ -94,7 +115,7 @@ fn is_window_capturable(window: &screencapturekit::shareable_content::window::SC
     }
 
     let app = window.owning_application();
-    if app.process_id() == std::process::id() {
+    if app.process_id() == std::process::id().try_into().unwrap_or(-1) {
         return false;
     }
 
@@ -109,7 +130,7 @@ fn is_window_capturable(window: &screencapturekit::shareable_content::window::SC
 fn is_system_window(window: &screencapturekit::shareable_content::window::SCWindow) -> bool {
     let title = window.title();
     let app = window.owning_application();
-    let owner = app.application_name().unwrap_or_else(|| "Unknown".to_string());
+    let owner = app.application_name();
     
     let system_patterns = [
         "Menubar", "Dock", "Desktop", "Notification Center",
@@ -155,7 +176,7 @@ pub fn get_main_display() -> Result<Display> {
 fn get_display_dimensions() -> (u64, u64) {
     if let Ok(content) = screencapturekit::shareable_content::SCShareableContent::get() {
         if let Some(display) = content.displays().first() {
-            let frame = display.get_frame();
+            let frame = display.frame();
             return (frame.size.width as u64, frame.size.height as u64);
         }
     }
