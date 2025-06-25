@@ -61,8 +61,8 @@ impl GraphicsCaptureApiHandler for Capturer {
                     .buffer_crop(start_x, start_y, end_x, end_y)
                     .expect("Failed to crop buffer");
 
-                // Fix: Use the correct method name
-                let raw_frame_buffer = match cropped_buffer.as_nopadding_buffer() {
+                // Fix: Use the correct method name (as_raw_nopadding_buffer)
+                let raw_frame_buffer = match cropped_buffer.as_raw_nopadding_buffer() {
                     Ok(buffer) => buffer,
                     Err(_) => return Err(("Failed to get raw buffer").into()),
                 };
@@ -162,8 +162,11 @@ pub fn create_capturer(options: &Options, tx: AsyncFrameSender) -> anyhow::Resul
 
     let settings = match target {
         Target::Display(display) => {
-            // Fix: Handle the raw_handle properly for HMONITOR
-            let monitor = WCMonitor::from_raw_hmonitor(display.raw_handle.0 as isize);
+            // Fix: Properly handle the raw_handle conversion
+            let monitor = match WCMonitor::from_raw_hmonitor(display.raw_handle.0 as isize) {
+                Some(m) => m,
+                None => return Err(anyhow::anyhow!("Failed to create monitor from handle")),
+            };
             Settings::Display(WCSettings::new(
                 monitor,
                 show_cursor,
@@ -176,8 +179,11 @@ pub fn create_capturer(options: &Options, tx: AsyncFrameSender) -> anyhow::Resul
             ))
         },
         Target::Window(window) => {
-            // Fix: Handle the raw_handle properly for HWND
-            let win = WCWindow::from_raw_hwnd(window.raw_handle.0 as isize);
+            // Fix: Properly handle the raw_handle conversion
+            let win = match WCWindow::from_raw_hwnd(window.raw_handle.0 as isize) {
+                Some(w) => w,
+                None => return Err(anyhow::anyhow!("Failed to create window from handle")),
+            };
             Settings::Window(WCSettings::new(
                 win,
                 show_cursor,

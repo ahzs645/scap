@@ -159,7 +159,6 @@ impl Capturer {
         })
     }
 
-    /// Start capture (sync version)
     pub fn start_capture(&mut self) -> Result<()> {
         // Create a sync channel for frame communication
         let (frame_tx, frame_rx) = std::sync::mpsc::channel();
@@ -171,16 +170,22 @@ impl Capturer {
             // Create async sender that bridges to sync channel
             let (async_sender, mut async_receiver) = async_frame::create_channel();
             
-            // Create the Mac engine
-            let mut mac_capturer = engine::mac::ScreenCapturer::new(
+            // Create the Mac engine with proper initialization
+            let mac_capturer = engine::mac::ScreenCapturer::new(
                 async_sender,
                 Arc::clone(&self.frame_pool)
-            );
+            )?; // Handle the Result properly
+            
+            // Extract target from options or use default
+            let target = self.options.target.clone().unwrap_or_else(|| {
+                crate::targets::Target::Display(
+                    crate::targets::get_main_display().unwrap()
+                )
+            });
             
             // Spawn a thread to bridge async to sync
             let sync_sender = frame_tx.clone();
             std::thread::spawn(move || {
-                // Simple runtime for handling async frames
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -195,16 +200,8 @@ impl Capturer {
                 });
             });
             
-            // Create another runtime for the capture operation
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?;
-            
-            // Start capture in the runtime
-            rt.block_on(async {
-                mac_capturer.start_capture(&self.options).await?;
-                Ok::<_, anyhow::Error>(())
-            })?;
+            // Start capture with the target
+            mac_capturer.start_capture(&target)?;
             
             self.mac_engine = Some(mac_capturer);
         }
@@ -237,28 +234,21 @@ impl Capturer {
         Ok(())
     }
 
-    /// Stop capture (sync version)
     pub fn stop_capture(&mut self) -> Result<()> {
         #[cfg(target_os = "macos")]
-        if let Some(mut engine) = self.mac_engine.take() {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?;
-            
-            rt.block_on(async {
-                engine.stop_capture().await?;
-                Ok::<_, anyhow::Error>(())
-            })?;
+        if let Some(engine) = self.mac_engine.take() {
+            // Remove .await since stop_capture is not async
+            engine.stop_capture()?;
         }
         
         #[cfg(target_os = "windows")]
-        if let Some(engine) = self.win_engine.take() {
-            // ... existing Windows code ...
+        if let Some(mut engine) = self.win_engine.take() {
+            engine.stop_capture();
         }
         
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        if let Some(engine) = self.linux_engine.take() {
-            // ... existing Linux code ...
+        if let Some(mut engine) = self.linux_engine.take() {
+            engine.stop_capture();
         }
         
         self.is_capturing = false;

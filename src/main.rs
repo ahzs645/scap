@@ -136,6 +136,42 @@ fn main() {
                     frame.display_time - start_time
                 );
             }
+            Frame::RGBx(frame) => {
+                if start_time == 0 {
+                    start_time = frame.display_time;
+                }
+                println!(
+                    "Received RGBx frame {} of width {} and height {} and time {}",
+                    i,
+                    frame.width,
+                    frame.height,
+                    frame.display_time - start_time
+                );
+            }
+            Frame::XBGR(frame) => {
+                if start_time == 0 {
+                    start_time = frame.display_time;
+                }
+                println!(
+                    "Received XBGR frame {} of width {} and height {} and time {}",
+                    i,
+                    frame.width,
+                    frame.height,
+                    frame.display_time - start_time
+                );
+            }
+            Frame::BGRx(frame) => {
+                if start_time == 0 {
+                    start_time = frame.display_time;
+                }
+                println!(
+                    "Received BGRx frame {} of width {} and height {} and time {}",
+                    i,
+                    frame.width,
+                    frame.height,
+                    frame.display_time - start_time
+                );
+            }
         }
     }
 

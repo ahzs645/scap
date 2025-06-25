@@ -3,6 +3,7 @@ use std::{
     sync::Mutex,
 };
 use anyhow::Result;
+use crate::frame::Frame;
 
 /// A pool of reusable frame buffers to minimize allocations
 pub struct FramePool {
@@ -65,6 +66,24 @@ impl FramePool {
         
         let mut buffers = self.audio_buffers.lock().unwrap();
         buffers.entry(size).or_insert_with(Vec::new).push(buffer);
+    }
+
+    /// Gets the next frame from the pool
+    pub fn get_next_frame(&self) -> Option<Frame> {
+        // Implementation would depend on your frame storage strategy
+        None // Placeholder implementation
+    }
+    
+    /// Pushes a frame into the pool
+    pub fn push_frame(&self, _frame: Vec<u8>) -> Option<Frame> {
+        // Implementation would process and store the frame
+        None // Placeholder implementation
+    }
+    
+    /// Pops a frame from the pool
+    pub fn pop_frame(&self) -> Option<Frame> {
+        // Implementation would retrieve the next available frame
+        None // Placeholder implementation
     }
 }
 

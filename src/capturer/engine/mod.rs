@@ -62,7 +62,7 @@ impl Engine {
     pub fn new(options: Options, frame_sender: AsyncFrameSender, frame_pool: Arc<FramePool>) -> Result<Self> {
         #[cfg(target_os = "macos")]
         {
-            let mac_capturer = Some(mac::ScreenCapturer::new(frame_sender.clone(), Arc::clone(&frame_pool)));
+            let mac_capturer = Some(mac::ScreenCapturer::new(frame_sender.clone(), Arc::clone(&frame_pool))?);
             
             Ok(Self {
                 options,
@@ -101,7 +101,13 @@ impl Engine {
         #[cfg(target_os = "macos")]
         {
             if let Some(ref mut capturer) = self.mac_capturer {
-                capturer.start_capture(&self.options).await?;
+                // Extract target from options
+                let default_target = crate::targets::Target::Display(
+                    crate::targets::get_main_display().unwrap()
+                );
+                let target = self.options.target.as_ref().unwrap_or(&default_target);
+                // Remove .await since start_capture is not async
+                capturer.start_capture(target)?;
             }
             Ok(())
         }
@@ -123,7 +129,8 @@ impl Engine {
         #[cfg(target_os = "macos")]
         {
             if let Some(ref mut capturer) = self.mac_capturer {
-                capturer.stop_capture().await?;
+                // Remove .await since stop_capture is not async
+                capturer.stop_capture()?;
             }
             Ok(())
         }
