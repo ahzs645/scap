@@ -4,25 +4,26 @@ use anyhow::Result;
 use crate::frame::Frame;
 
 /// Represents the state of the capture stream
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CaptureState {
     Idle,
     Starting,
     Running,
     Pausing,
     Stopping,
+    Stopped,
     Error(String),
 }
 
 /// Async frame receiver that provides non-blocking access to captured frames
 pub struct AsyncFrameReceiver {
-    rx: mpsc::Receiver<Result<Frame>>,
+    rx: mpsc::Receiver<Frame>,
     state: Arc<Mutex<CaptureState>>,
 }
 
 /// Async frame sender used by the capture engine to send frames
 pub struct AsyncFrameSender {
-    tx: mpsc::Sender<Result<Frame>>,
+    tx: mpsc::Sender<Frame>,
     state: Arc<Mutex<CaptureState>>,
 }
 
@@ -39,32 +40,51 @@ impl AsyncFrameReceiver {
             },
             AsyncFrameSender {
                 tx,
-                state: Arc::clone(&state),
+                state,
             }
         )
     }
 
     /// Asynchronously receives the next frame
-    pub async fn next_frame(&mut self) -> Option<Result<Frame>> {
+    pub async fn recv(&mut self) -> Result<Frame> {
         self.rx.recv().await
+            .ok_or_else(|| anyhow::anyhow!("Frame channel closed"))
     }
 
     /// Gets the current capture state
     pub async fn state(&self) -> CaptureState {
-        self.state.lock().await.clone()
+        *self.state.lock().await
     }
 }
 
 impl AsyncFrameSender {
     /// Sends a frame asynchronously
-    pub async fn send_frame(&self, frame: Result<Frame>) -> Result<()> {
-        self.tx.send(frame).await.map_err(|e| anyhow::anyhow!("Failed to send frame: {}", e))
+    pub fn send(&self, frame: Frame) -> Result<()> {
+        self.tx.try_send(frame)
+            .map_err(|e| anyhow::anyhow!("Failed to send frame: {}", e))
     }
 
-    /// Updates the capture state
+    /// Sets the capture state
     pub async fn set_state(&self, state: CaptureState) {
         *self.state.lock().await = state;
     }
+}
+
+impl Clone for AsyncFrameSender {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            state: Arc::clone(&self.state),
+        }
+    }
+}
+
+pub fn create_channel() -> (AsyncFrameSender, AsyncFrameReceiver) {
+    let (tx, rx) = mpsc::channel(32); // Buffer size of 32 frames
+    (
+        AsyncFrameSender { tx, state: Arc::new(Mutex::new(CaptureState::Idle)) },
+        AsyncFrameReceiver { rx },
+    )
 }
 
 #[cfg(test)]

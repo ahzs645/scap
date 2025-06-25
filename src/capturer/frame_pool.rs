@@ -1,80 +1,70 @@
-use std::sync::{Arc, Mutex};
-use std::collections::VecDeque;
+use std::{
+    collections::HashMap,
+    sync::Mutex,
+};
+use anyhow::Result;
 
 /// A pool of reusable frame buffers to minimize allocations
 pub struct FramePool {
-    video_buffers: Arc<Mutex<VecDeque<Vec<u8>>>>,
-    audio_buffers: Arc<Mutex<VecDeque<Vec<u8>>>>,
-    max_pool_size: usize,
+    video_buffers: Mutex<HashMap<usize, Vec<Vec<u8>>>>,
+    audio_buffers: Mutex<HashMap<usize, Vec<Vec<u8>>>>,
 }
 
 impl FramePool {
-    /// Creates a new frame pool with the specified maximum size
-    pub fn new(max_pool_size: usize) -> Self {
+    /// Creates a new frame pool
+    pub fn new() -> Self {
         Self {
-            video_buffers: Arc::new(Mutex::new(VecDeque::with_capacity(max_pool_size))),
-            audio_buffers: Arc::new(Mutex::new(VecDeque::with_capacity(max_pool_size))),
-            max_pool_size,
+            video_buffers: Mutex::new(HashMap::new()),
+            audio_buffers: Mutex::new(HashMap::new()),
         }
     }
 
     /// Gets a video buffer from the pool or creates a new one
-    pub fn get_video_buffer(&self, min_size: usize) -> Vec<u8> {
-        let mut pool = self.video_buffers.lock().unwrap();
+    pub fn get_video_buffer(&self, size: usize) -> Result<Vec<u8>> {
+        let mut buffers = self.video_buffers.lock().unwrap();
         
-        // Try to find a buffer of suitable size
-        for i in 0..pool.len() {
-            if pool[i].capacity() >= min_size {
-                let mut buffer = pool.remove(i).unwrap();
-                buffer.clear(); // Clear but preserve capacity
-                return buffer;
+        // Try to get a buffer of the exact size
+        if let Some(pool) = buffers.get_mut(&size) {
+            if let Some(buffer) = pool.pop() {
+                return Ok(buffer);
             }
         }
         
-        // Create new buffer if none found
-        Vec::with_capacity(min_size)
+        // Create a new buffer if none available
+        Ok(Vec::with_capacity(size))
     }
 
     /// Gets an audio buffer from the pool or creates a new one
-    pub fn get_audio_buffer(&self, min_size: usize) -> Vec<u8> {
-        let mut pool = self.audio_buffers.lock().unwrap();
+    pub fn get_audio_buffer(&self, size: usize) -> Result<Vec<u8>> {
+        let mut buffers = self.audio_buffers.lock().unwrap();
         
-        // Try to find a buffer of suitable size
-        for i in 0..pool.len() {
-            if pool[i].capacity() >= min_size {
-                let mut buffer = pool.remove(i).unwrap();
-                buffer.clear(); // Clear but preserve capacity
-                return buffer;
+        // Try to get a buffer of the exact size
+        if let Some(pool) = buffers.get_mut(&size) {
+            if let Some(buffer) = pool.pop() {
+                return Ok(buffer);
             }
         }
         
-        // Create new buffer if none found
-        Vec::with_capacity(min_size)
+        // Create a new buffer if none available
+        Ok(Vec::with_capacity(size))
     }
 
     /// Returns a video buffer to the pool
-    pub fn return_video_buffer(&self, buffer: Vec<u8>) {
-        let mut pool = self.video_buffers.lock().unwrap();
-        if pool.len() < self.max_pool_size {
-            pool.push_back(buffer);
-        }
+    pub fn return_video_buffer(&self, mut buffer: Vec<u8>) {
+        let size = buffer.capacity();
+        buffer.clear();
+        
+        let mut buffers = self.video_buffers.lock().unwrap();
+        buffers.entry(size).or_insert_with(Vec::new).push(buffer);
     }
 
     /// Returns an audio buffer to the pool
-    pub fn return_audio_buffer(&self, buffer: Vec<u8>) {
-        let mut pool = self.audio_buffers.lock().unwrap();
-        if pool.len() < self.max_pool_size {
-            pool.push_back(buffer);
-        }
-    }
-
-    /// Creates a clone of the pool that shares the same underlying buffers
-    pub fn clone(&self) -> Self {
-        Self {
-            video_buffers: Arc::clone(&self.video_buffers),
-            audio_buffers: Arc::clone(&self.audio_buffers),
-            max_pool_size: self.max_pool_size,
-        }
+    pub fn return_audio_buffer(&self, mut buffer: Vec<u8>) {
+        let size = buffer.capacity();
+        buffer.clear();
+        
+        let mut buffers = self.audio_buffers.lock().unwrap();
+        buffers.entry(size).or_insert_with(Vec::new).push(buffer);
     }
 }
 
@@ -84,49 +74,58 @@ mod tests {
 
     #[test]
     fn test_video_buffer_reuse() {
-        let pool = FramePool::new(2);
+        let pool = FramePool::new();
         
-        // Get a buffer and fill it
-        let mut buf1 = pool.get_video_buffer(1024);
-        buf1.extend_from_slice(&[1; 1024]);
-        assert_eq!(buf1.capacity(), 1024);
+        // Get a new buffer
+        let mut buffer = pool.get_video_buffer(1024).unwrap();
+        buffer.extend_from_slice(&[1; 1024]);
         
         // Return it to the pool
-        pool.return_video_buffer(buf1);
+        pool.return_video_buffer(buffer);
         
-        // Get another buffer - should reuse the first one
-        let buf2 = pool.get_video_buffer(512);
-        assert_eq!(buf2.capacity(), 1024); // Same capacity as original
-        assert!(buf2.is_empty()); // But should be empty
+        // Get it back
+        let buffer2 = pool.get_video_buffer(1024).unwrap();
+        assert_eq!(buffer2.capacity(), 1024);
+        assert!(buffer2.is_empty());
     }
 
     #[test]
     fn test_audio_buffer_reuse() {
-        let pool = FramePool::new(2);
+        let pool = FramePool::new();
         
-        // Get a buffer and fill it
-        let mut buf1 = pool.get_audio_buffer(1024);
-        buf1.extend_from_slice(&[1; 1024]);
-        assert_eq!(buf1.capacity(), 1024);
+        // Get a new buffer
+        let mut buffer = pool.get_audio_buffer(512).unwrap();
+        buffer.extend_from_slice(&[1; 512]);
         
         // Return it to the pool
-        pool.return_audio_buffer(buf1);
+        pool.return_audio_buffer(buffer);
         
-        // Get another buffer - should reuse the first one
-        let buf2 = pool.get_audio_buffer(512);
-        assert_eq!(buf2.capacity(), 1024); // Same capacity as original
-        assert!(buf2.is_empty()); // But should be empty
+        // Get it back
+        let buffer2 = pool.get_audio_buffer(512).unwrap();
+        assert_eq!(buffer2.capacity(), 512);
+        assert!(buffer2.is_empty());
     }
 
     #[test]
-    fn test_pool_size_limit() {
-        let pool = FramePool::new(1);
+    fn test_different_size_buffers() {
+        let pool = FramePool::new();
         
-        // Add two buffers but only one should be stored
-        pool.return_video_buffer(Vec::with_capacity(1024));
-        pool.return_video_buffer(Vec::with_capacity(2048));
+        // Get buffers of different sizes
+        let buffer1 = pool.get_video_buffer(1024).unwrap();
+        let buffer2 = pool.get_video_buffer(2048).unwrap();
         
-        let buffers = pool.video_buffers.lock().unwrap();
-        assert_eq!(buffers.len(), 1);
+        assert_eq!(buffer1.capacity(), 1024);
+        assert_eq!(buffer2.capacity(), 2048);
+        
+        // Return them to the pool
+        pool.return_video_buffer(buffer1);
+        pool.return_video_buffer(buffer2);
+        
+        // Get them back
+        let buffer3 = pool.get_video_buffer(1024).unwrap();
+        let buffer4 = pool.get_video_buffer(2048).unwrap();
+        
+        assert_eq!(buffer3.capacity(), 1024);
+        assert_eq!(buffer4.capacity(), 2048);
     }
 } 

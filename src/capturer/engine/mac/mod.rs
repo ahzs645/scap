@@ -14,14 +14,20 @@ use screencapturekit::{
     },
 };
 use tokio::sync::Mutex;
+use anyhow::anyhow;
+use crate::capturer::{
+    async_frame::AsyncFrameSender,
+    frame_pool::FramePool,
+};
+use core_media_rs::cm_time::CMTime;
+use screencapturekit::shareable_content::{display, window};
+use crate::capturer::engine::mac::audio_buffer::process_audio_buffer;
 
 use crate::frame::{Frame, FrameType};
 use crate::targets::Target;
 use crate::{
     capturer::{Area, Options, Point, Resolution, Size},
     targets,
-    async_frame::AsyncFrameSender,
-    frame_pool::FramePool,
 };
 
 use super::ChannelItem;
@@ -34,7 +40,6 @@ mod cg_fallback;
 mod window;
 
 use pixel_buffer::PixelBuffer;
-use audio_buffer::process_audio_buffer;
 use window::{WindowCaptureSession, WindowEvent, configure_stream_for_window, create_window_filter};
 
 pub struct ScreenCapturer {
@@ -57,7 +62,7 @@ impl ScreenCapturer {
     pub async fn start_capture(&mut self, options: &Options) -> Result<()> {
         match &options.target {
             Some(Target::Window(window)) => {
-                let content = SCShareableContent::current()
+                let content = SCShareableContent::get()
                     .map_err(|e| anyhow!("Failed to get shareable content: {}", e))?;
                 
                 let sc_window = content.windows()
@@ -70,7 +75,7 @@ impl ScreenCapturer {
                 self.window_session = Some(session);
             }
             Some(Target::Display(display)) => {
-                let content = SCShareableContent::current()
+                let content = SCShareableContent::get()
                     .map_err(|e| anyhow!("Failed to get shareable content: {}", e))?;
                 
                 let sc_display = content.displays()
@@ -78,8 +83,8 @@ impl ScreenCapturer {
                     .find(|d| d.display_id() as u32 == display.id)
                     .ok_or_else(|| anyhow!("Display not found"))?;
                 
-                let filter = SCContentFilter::new()
-                    .with_display(&sc_display);
+                let mut filter = SCContentFilter::new();
+                filter.set_displays(vec![sc_display]);
                 
                 let mut config = SCStreamConfiguration::new();
                 config.set_width(display.width as u32);
@@ -88,7 +93,9 @@ impl ScreenCapturer {
                 config.set_pixel_format(screencapturekit::sys::kCVPixelFormatType_32BGRA);
                 
                 if let Some(fps) = Some(options.fps) {
-                    config.set_minimum_frame_interval(1.0 / fps as f64);
+                    let frame_duration = CMTime::new(1, fps as i32);
+                    config.set_minimum_frame_interval(&frame_duration)
+                        .map_err(|e| anyhow!("Failed to set frame interval: {}", e))?;
                 }
                 
                 let stream = SCStream::new(&filter, &config)
@@ -213,18 +220,17 @@ pub fn create_stream(
     frame_pool: Arc<FramePool>,
 ) -> Result<SCStream> {
     let filter = match &options.target {
-        Some(target) => match target {
-            Target::Display(display) => {
-                SCContentFilter::display(display.clone())
-                    .map_err(|e| anyhow::anyhow!("Failed to create display filter: {}", e))?
-            }
-            Target::Window(window) => {
-                create_window_filter(target, options)
-                    .map_err(|e| anyhow::anyhow!("Failed to create window filter: {}", e))?
-            }
-        },
-        None => SCContentFilter::display_default()
-            .map_err(|e| anyhow::anyhow!("Failed to create default display filter: {}", e))?,
+        Some(Target::Display(display)) => {
+            let mut filter = SCContentFilter::new();
+            filter.set_displays(vec![display.raw_handle.clone()]);
+            filter
+        }
+        Some(Target::Window(window)) => {
+            let mut filter = SCContentFilter::new();
+            filter.set_windows(vec![window.raw_handle.clone()]);
+            filter
+        }
+        None => SCContentFilter::new(),
     };
 
     let mut config = SCStreamConfiguration::new();
@@ -239,6 +245,13 @@ pub fn create_stream(
             config.set_width(1920); // TODO: Get from display
             config.set_height(1080);
         }
+    }
+
+    // Configure frame rate
+    if let Some(fps) = Some(options.fps) {
+        let frame_duration = CMTime::new(1, fps as i32);
+        config.set_minimum_frame_interval(&frame_duration)
+            .map_err(|e| anyhow!("Failed to set frame interval: {}", e))?;
     }
 
     // Configure audio
@@ -262,7 +275,7 @@ pub fn create_stream(
         config.set_channel_count(channels);
     }
 
-    let stream = SCStream::new(filter, config)
+    let stream = SCStream::new(&filter, &config)
         .map_err(|e| anyhow::anyhow!("Failed to create stream: {}", e))?;
 
     stream.add_output(ScreenCapturer::new(frame_sender.clone(), Arc::clone(&frame_pool)));

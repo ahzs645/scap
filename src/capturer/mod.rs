@@ -25,48 +25,25 @@ use async_frame::{AsyncFrameReceiver, AsyncFrameSender, CaptureState};
 pub use frame_pool::FramePool;
 pub use error_recovery::{ErrorRecovery, ErrorRecoveryConfig};
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Resolution {
-    _480p,
-    _720p,
-    _1080p,
-    _1440p,
-    _2160p,
-    _4320p,
-
-    #[default]
-    Captured,
+    Native,
+    Custom(Size),
 }
 
-impl Resolution {
-    fn value(&self, aspect_ratio: f32) -> [u32; 2] {
-        match *self {
-            Resolution::_480p => [640, (640_f32 / aspect_ratio).floor() as u32],
-            Resolution::_720p => [1280, (1280_f32 / aspect_ratio).floor() as u32],
-            Resolution::_1080p => [1920, (1920_f32 / aspect_ratio).floor() as u32],
-            Resolution::_1440p => [2560, (2560_f32 / aspect_ratio).floor() as u32],
-            Resolution::_2160p => [3840, (3840_f32 / aspect_ratio).floor() as u32],
-            Resolution::_4320p => [7680, (7680_f32 / aspect_ratio).floor() as u32],
-            Resolution::Captured => {
-                panic!(".value should not be called when Resolution type is Captured")
-            }
-        }
-    }
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct Point {
-    pub x: i32,
-    pub y: i32,
-}
-
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Size {
     pub width: i32,
     pub height: i32,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Point {
+    pub x: i32,
+    pub y: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Area {
     pub origin: Point,
     pub size: Size,
@@ -131,7 +108,7 @@ pub struct Options {
     pub exclude_overlapping_windows: Option<bool>,
 
     /// Window frame padding
-    pub window_frame_padding: Option<f64>,
+    pub window_frame_padding: Option<f32>,
 
     /// Whether to match window resolution
     pub match_window_resolution: Option<bool>,
@@ -144,13 +121,13 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             target: None,
-            output_type: FrameType::BGRAFrame,
-            output_resolution: Resolution::Captured,
+            fps: 30,
             show_cursor: true,
             show_highlight: false,
-            crop_area: None,
-            fps: 30,
             excluded_targets: None,
+            output_type: FrameType::BGRAFrame,
+            output_resolution: Resolution::Native,
+            crop_area: None,
             capture_system_audio: None,
             exclude_current_process_audio: None,
             audio_sample_rate: None,
@@ -158,10 +135,10 @@ impl Default for Options {
             capture_microphone: None,
             microphone_device_id: None,
             window_audio: None,
-            exclude_overlapping_windows: Some(false),
+            exclude_overlapping_windows: None,
             window_frame_padding: None,
-            match_window_resolution: Some(true),
-            include_window_shadow: Some(true),
+            match_window_resolution: None,
+            include_window_shadow: None,
         }
     }
 }
@@ -201,25 +178,16 @@ impl Capturer {
         note = "Use `build` instead of `new` to create a new capturer instance."
     )]
     pub fn new(options: Options) -> anyhow::Result<Capturer> {
-        let (frame_receiver, frame_sender) = AsyncFrameReceiver::new(32); // Buffer size of 32 frames
-        let state = Arc::new(Mutex::new(CaptureState::Idle));
-        
-        let engine = Engine::new(options, frame_sender)?;
-        
-        Ok(Self {
-            engine,
-            frame_receiver,
-            state: state.clone(),
-        })
+        Self::build(options)
     }
 
     /// Build a new [Capturer] instance with the provided options
     pub fn build(options: Options) -> Result<Self> {
-        let frame_pool = Arc::new(FramePool::new(10)); // Pool size of 10 buffers
-        let (frame_sender, frame_receiver) = async_frame::create_channel();
+        let frame_pool = Arc::new(FramePool::new(10));
+        let (frame_sender, frame_receiver) = AsyncFrameReceiver::new(32);
         let state = Arc::new(Mutex::new(CaptureState::Stopped));
         
-        let error_recovery = ErrorRecovery::new(ErrorRecoveryConfig::default());
+        let error_recovery = ErrorRecovery::new(Arc::clone(&state), Some(ErrorRecoveryConfig::default()));
         
         let engine = Engine::new(options, frame_sender, Arc::clone(&frame_pool))?;
         

@@ -31,8 +31,8 @@ pub fn process_audio_sample_buffer(sample_buffer: CMSampleBuffer) -> Result<Audi
         .context("Failed to get format description")?;
     
     let audio_format = format_description
-        .get_audio_stream_basic_description()
-        .context("Failed to get audio stream description")?;
+        .audio_format_description()
+        .context("Failed to get audio format description")?;
     
     // Extract actual format parameters
     let sample_rate = audio_format.sample_rate as u32;

@@ -37,19 +37,18 @@ fn get_display_name(display_id: CGDirectDisplayID) -> String {
 }
 
 pub fn get_all_targets() -> Result<Vec<Target>> {
-    let sc_shareable_content = screencapturekit::ShareableContent::current()
+    let sc_shareable_content = screencapturekit::ShareableContent::get()
         .map_err(|e| anyhow::anyhow!("Failed to get shareable content: {}", e))?;
 
     let mut targets = Vec::new();
 
     // Add displays
     for display in sc_shareable_content.displays() {
-        let cg_display = CGDisplay::new(display.display_id() as u32);
         targets.push(Target::Display(Display {
             id: display.display_id() as u32,
             title: format!("Display {}", display.display_id()),
-            width: cg_display.pixels_wide(),
-            height: cg_display.pixels_high(),
+            width: display.width() as u64,
+            height: display.height() as u64,
             raw_handle: display,
         }));
     }
@@ -57,11 +56,19 @@ pub fn get_all_targets() -> Result<Vec<Target>> {
     // Add windows with better filtering
     for window in sc_shareable_content.windows() {
         if !is_system_window(&window) && is_window_capturable(&window) {
+            let app = window.owning_application();
             targets.push(Target::Window(Window {
                 id: window.window_id() as u32,
                 title: window.title().unwrap_or_default(),
-                width: window.frame().size.width as u64,
-                height: window.frame().size.height as u64,
+                width: window.get_frame().size.width as u64,
+                height: window.get_frame().size.height as u64,
+                app_name: app.as_ref().and_then(|a| a.application_name()).unwrap_or_default(),
+                app_bundle_id: app.as_ref().and_then(|a| a.bundle_identifier()).unwrap_or_default(),
+                is_on_screen: window.is_on_screen(),
+                process_id: app.as_ref().map(|a| a.process_id()).unwrap_or(0),
+                window_level: window.window_level(),
+                has_shadow: true, // Default value
+                is_transparent: false, // Default value
                 raw_handle: window,
             }));
         }
@@ -135,7 +142,7 @@ fn is_window_capturable(window: &SCWindow) -> bool {
     }
 
     // Skip windows with no content
-    let frame = window.frame();
+    let frame = window.get_frame();
     if frame.size.width < 50.0 || frame.size.height < 50.0 {
         return false;
     }
@@ -153,11 +160,22 @@ fn is_window_capturable(window: &SCWindow) -> bool {
 pub fn get_main_display() -> Result<Display> {
     let id = unsafe { CGMainDisplayID() };
     let title = get_display_name(id);
+    
+    // Get the display from ScreenCaptureKit
+    let content = screencapturekit::ShareableContent::get()
+        .map_err(|e| anyhow::anyhow!("Failed to get shareable content: {}", e))?;
+    
+    let display = content.displays()
+        .into_iter()
+        .find(|d| d.display_id() as u32 == id)
+        .ok_or_else(|| anyhow::anyhow!("Main display not found"))?;
 
     Ok(Display {
         id,
         title,
-        raw_handle: CGDisplay::new(id),
+        width: display.width() as u64,
+        height: display.height() as u64,
+        raw_handle: display,
     })
 }
 
