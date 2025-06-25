@@ -4,10 +4,26 @@ mod mac;
 #[cfg(target_os = "windows")]
 mod win;
 
-use anyhow::Result;
-
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 pub(crate) mod linux;
+
+use anyhow::Result;
+
+// Platform-specific raw handle types
+#[cfg(target_os = "macos")]
+pub type WindowHandle = u32; // Use window ID instead of SCWindow for simplicity
+#[cfg(target_os = "macos")]
+pub type DisplayHandle = u32; // Use display ID instead of SCDisplay for simplicity
+
+#[cfg(target_os = "windows")]
+pub type WindowHandle = windows::Win32::Foundation::HWND;
+#[cfg(target_os = "windows")]
+pub type DisplayHandle = windows::Win32::Graphics::Gdi::HMONITOR;
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub type WindowHandle = xcb::x::Window;
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub type DisplayHandle = xcb::x::Window;
 
 #[derive(Debug, Clone)]
 pub struct Window {
@@ -22,7 +38,7 @@ pub struct Window {
     pub window_level: i32,
     pub has_shadow: bool,
     pub is_transparent: bool,
-    pub raw_handle: screencapturekit::window::SCWindow,
+    pub raw_handle: WindowHandle,
 }
 
 #[derive(Debug, Clone)]
@@ -31,7 +47,11 @@ pub struct Display {
     pub title: String,
     pub width: u64,
     pub height: u64,
-    pub raw_handle: screencapturekit::display::SCDisplay,
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub x_offset: i16,
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub y_offset: i16,
+    pub raw_handle: DisplayHandle,
 }
 
 #[derive(Debug, Clone)]
@@ -40,7 +60,7 @@ pub enum Target {
     Window(Window),
 }
 
-// Both `HWND` and `HMONITOR` are `Send` and `Sync`, so we can safely implement these traits for `Target`
+// Safety implementations for Windows
 #[cfg(target_os = "windows")]
 unsafe impl Send for Target {}
 #[cfg(target_os = "windows")]

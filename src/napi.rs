@@ -110,15 +110,15 @@ impl ScreenCapture {
                 Target::Display(display) => ScreenSource {
                     id: format!("display:{}", display.id),
                     name: display.title,
-                    width: 1920, // Default width - actual dimensions would need to be retrieved from raw_handle
-                    height: 1080, // Default height
+                    width: display.width as u32,
+                    height: display.height as u32,
                     is_display: true,
                 },
                 Target::Window(window) => ScreenSource {
                     id: format!("window:{}", window.id),
                     name: window.title,
-                    width: 800, // Default window dimensions
-                    height: 600,
+                    width: window.width as u32,
+                    height: window.height as u32,
                     is_display: false,
                 },
             }
@@ -146,7 +146,10 @@ impl ScreenCapture {
                 Error::new(Status::GenericFailure, "Failed to lock capturer")
             })?;
             
-            capturer.start_capture();
+            // Use sync version to avoid async complications in NAPI
+            capturer.start_capture_sync().map_err(|e| {
+                Error::new(Status::GenericFailure, format!("Failed to start capture: {}", e))
+            })?;
             Ok(())
         } else {
             Err(Error::new(Status::GenericFailure, "Capturer not created"))
@@ -161,7 +164,10 @@ impl ScreenCapture {
                 Error::new(Status::GenericFailure, "Failed to lock capturer")
             })?;
             
-            capturer.stop_capture();
+            // Use sync version to avoid async complications in NAPI
+            capturer.stop_capture_sync().map_err(|e| {
+                Error::new(Status::GenericFailure, format!("Failed to stop capture: {}", e))
+            })?;
             Ok(())
         } else {
             Err(Error::new(Status::GenericFailure, "Capturer not created"))
@@ -172,11 +178,12 @@ impl ScreenCapture {
     #[napi]
     pub fn get_next_frame(&self) -> Result<FrameData> {
         if let Some(ref capturer) = self.capturer {
-            let capturer = capturer.lock().map_err(|_| {
+            let mut capturer = capturer.lock().map_err(|_| {
                 Error::new(Status::GenericFailure, "Failed to lock capturer")
             })?;
             
-            let frame = capturer.get_next_frame().map_err(|e| {
+            // Use sync version to avoid async complications in NAPI
+            let frame = capturer.get_next_frame_sync().map_err(|e| {
                 Error::new(Status::GenericFailure, format!("Failed to get frame: {}", e))
             })?;
 
@@ -257,6 +264,11 @@ impl ScreenCapture {
             audio_channel_count: opts.audio_channel_count,
             capture_microphone: opts.capture_microphone,
             microphone_device_id: opts.microphone_device_id,
+            window_audio: None,
+            exclude_overlapping_windows: None,
+            window_frame_padding: None,
+            match_window_resolution: None,
+            include_window_shadow: None,
         })
     }
 

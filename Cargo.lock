@@ -1223,9 +1223,6 @@ dependencies = [
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
  "core-graphics-helmer-fork",
- "core-media-rs",
- "core-utils-rs",
- "core-video-rs",
  "dbus",
  "dispatch",
  "log",
@@ -1239,7 +1236,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sysinfo",
- "tao-core-video-sys",
  "tokio",
  "windows 0.61.1",
  "windows-capture",
@@ -1379,18 +1375,6 @@ dependencies = [
  "pkg-config",
  "toml",
  "version-compare",
-]
-
-[[package]]
-name = "tao-core-video-sys"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "271450eb289cb4d8d0720c6ce70c72c8c858c93dd61fc625881616752e6b98f6"
-dependencies = [
- "cfg-if",
- "core-foundation-sys",
- "libc",
- "objc",
 ]
 
 [[package]]
