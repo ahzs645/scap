@@ -8,7 +8,7 @@ use super::async_frame::CaptureState;
 #[derive(Debug, Clone)]
 pub struct ErrorRecoveryConfig {
     /// Maximum number of retry attempts before giving up
-    pub max_retries: u32,
+    pub max_retries: Option<u32>,
     /// Initial delay before first retry attempt
     pub initial_retry_delay: Duration,
     /// Maximum delay between retry attempts
@@ -20,7 +20,7 @@ pub struct ErrorRecoveryConfig {
 impl Default for ErrorRecoveryConfig {
     fn default() -> Self {
         Self {
-            max_retries: 3,
+            max_retries: Some(3),
             initial_retry_delay: Duration::from_millis(100),
             max_retry_delay: Duration::from_secs(5),
             backoff_factor: 2.0,
@@ -51,7 +51,7 @@ impl ErrorRecovery {
     /// Handles a stream error and attempts recovery
     pub async fn handle_error(&mut self, error: &Error) -> Option<Duration> {
         // Check if we should retry
-        if self.retry_count >= self.config.max_retries {
+        if self.retry_count >= self.config.max_retries.unwrap_or(0) {
             // Reset retry count and delay for next time
             self.retry_count = 0;
             self.current_delay = self.config.initial_retry_delay;
@@ -90,7 +90,7 @@ mod tests {
         let config = ErrorRecoveryConfig {
             initial_retry_delay: Duration::from_millis(10),
             max_retry_delay: Duration::from_millis(100),
-            max_retries: 3,
+            max_retries: Some(3),
             backoff_factor: 2.0,
         };
         
@@ -123,7 +123,7 @@ mod tests {
         let config = ErrorRecoveryConfig {
             initial_retry_delay: Duration::from_millis(100),
             max_retry_delay: Duration::from_millis(1000),
-            max_retries: 5,
+            max_retries: Some(5),
             backoff_factor: 2.0,
         };
         

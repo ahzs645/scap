@@ -226,22 +226,18 @@ impl Capturer {
 
     /// Get the next captured frame
     pub async fn get_next_frame(&mut self) -> Result<Frame> {
-        let state = self.state.lock().await;
-        if *state != CaptureState::Running {
-            return Err(anyhow::anyhow!("Capturer is not running"));
-        }
-        drop(state);
-
-        match self.frame_receiver.recv().await {
-            Ok(frame) => Ok(frame),
-            Err(e) => {
-                if let Some(retry_after) = self.error_recovery.handle_error(&e).await {
-                    tokio::time::sleep(retry_after).await;
-                    self.get_next_frame().await
-                } else {
-                    Err(e.into())
+        match self.state {
+            CaptureState::Running => {
+                match self.frame_receiver.try_recv() {
+                    Ok(frame) => Ok(frame),
+                    Err(_) => {
+                        // Use Box::pin for recursive async call
+                        Box::pin(self.get_next_frame()).await
+                    }
                 }
             }
+            CaptureState::Stopped => Err(anyhow!("Capture is stopped")),
+            CaptureState::Error(ref e) => Err(anyhow!("Capture error: {}", e)),
         }
     }
 

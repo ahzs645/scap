@@ -4,13 +4,9 @@ use anyhow::Result;
 use crate::frame::Frame;
 
 /// Represents the state of the capture stream
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CaptureState {
-    Idle,
-    Starting,
     Running,
-    Pausing,
-    Stopping,
     Stopped,
     Error(String),
 }

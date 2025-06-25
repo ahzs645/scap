@@ -12,11 +12,24 @@ use std::{ops::Deref, sync::mpsc};
 use crate::capturer::{engine::ChannelItem, RawCapturer};
 
 pub struct PixelBuffer {
-    pub display_time: u64,
-    pub width: usize,
-    pub height: usize,
-    pub bytes_per_row: usize,
-    pub buffer: CMSampleBuffer,
+    pub width: u32,
+    pub height: u32,
+    pub data: Vec<u8>,
+    pub bytes_per_row: u32,
+}
+
+impl PixelBuffer {
+    pub fn from_sample_buffer(buffer: &CMSampleBuffer) -> Option<Self> {
+        // ... existing code ...
+    }
+
+    pub fn buffer(&self) -> &CMSampleBuffer {
+        // ... existing code ...
+    }
+
+    pub fn bytes_per_row(&self) -> u32 {
+        self.bytes_per_row
+    }
 }
 
 impl PixelBuffer {
@@ -25,19 +38,11 @@ impl PixelBuffer {
     }
 
     pub fn width(&self) -> usize {
-        self.width
+        self.width as usize
     }
 
     pub fn height(&self) -> usize {
-        self.height
-    }
-
-    pub fn buffer(&self) -> &CMSampleBuffer {
-        &self.buffer
-    }
-
-    pub fn bytes_per_row(&self) -> usize {
-        self.bytes_per_row
+        self.height as usize
     }
 
     pub fn data(&self) -> PixelBufferData {
@@ -54,7 +59,7 @@ impl PixelBuffer {
                 panic!("CVPixelBufferGetBaseAddress returned null pointer");
             }
             
-            let total_size = self.bytes_per_row * self.height;
+            let total_size = self.bytes_per_row * self.height as usize;
             if total_size == 0 {
                 panic!("Invalid buffer size: bytes_per_row={}, height={}", self.bytes_per_row, self.height);
             }
@@ -64,7 +69,7 @@ impl PixelBuffer {
                 data: slice::from_raw_parts(
                     base_address as *mut _,
                     total_size,
-                ),
+                ).to_vec(),
             }
         }
     }
@@ -80,9 +85,9 @@ impl PixelBuffer {
             (0..count)
                 .map(|i| Plane {
                     buffer: pixel_buffer,
-                    width: CVPixelBufferGetWidthOfPlane(pixel_buffer, i),
-                    height: CVPixelBufferGetHeightOfPlane(pixel_buffer, i),
-                    bytes_per_row: CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, i),
+                    width: CVPixelBufferGetWidthOfPlane(pixel_buffer, i) as usize,
+                    height: CVPixelBufferGetHeightOfPlane(pixel_buffer, i) as usize,
+                    bytes_per_row: CVPixelBufferGetBytesPerRowOfPlane(pixel_buffer, i) as usize,
                     index: i,
                 })
                 .collect()
@@ -109,10 +114,10 @@ impl PixelBuffer {
         // With core-media-rs, we don't need to check frame status
         Some(Self {
             display_time,
-            width,
-            height,
-            bytes_per_row: unsafe { pixel_buffer_bytes_per_row(pixel_buffer) },
-            buffer: item.0,
+            width: width as u32,
+            height: height as u32,
+            bytes_per_row: unsafe { pixel_buffer_bytes_per_row(pixel_buffer) } as u32,
+            data: Vec::new(),
         })
     }
 }
@@ -166,7 +171,7 @@ impl Plane {
                 data: slice::from_raw_parts(
                     base_address as *mut _,
                     total_size,
-                ),
+                ).to_vec(),
             }
         }
     }
