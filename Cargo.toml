@@ -29,6 +29,8 @@ anyhow = "1.0.86"
 log = "0.4.16"
 sysinfo = "0.31.0"
 tokio = { version = "1.36", features = ["sync", "rt", "macros", "time"] }
+futures = "0.3"
+mp4 = "0.14"
 
 # NAPI-RS dependencies for Node.js bindings
 napi = { version = "2.0", features = ["napi8"], optional = true }
