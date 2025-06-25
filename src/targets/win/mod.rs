@@ -1,11 +1,11 @@
-use super::{Display, Target};
+use super::{Display, Target, Window};
 use anyhow::{Context as _, Result};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows::Win32::{
     Foundation::{HWND, RECT},
     Graphics::Gdi::HMONITOR,
 };
-use windows_capture::{monitor::Monitor, window::Window};
+use windows_capture::{monitor::Monitor, window::Window as WCWindow};
 
 pub fn get_all_targets() -> Result<Vec<Target>> {
     let mut targets: Vec<Target> = Vec::new();
@@ -18,18 +18,18 @@ pub fn get_all_targets() -> Result<Vec<Target>> {
             .device_name()
             .context("Failed to get monitor name")?;
 
-        let target = Target::Display(super::Display {
+        let target = Target::Display(Display {
             id,
             title,
             raw_handle: HMONITOR(display.as_raw_hmonitor()),
-            width: display.width()? as u16,
-            height: display.height()? as u16,
+            width: display.width()? as u64,
+            height: display.height()? as u64,
         });
         targets.push(target);
     }
 
     // Add windows to targets
-    let windows = Window::enumerate().context("Failed to enumerate windows")?;
+    let windows = WCWindow::enumerate().context("Failed to enumerate windows")?;
     for window in windows {
         let id = window.as_raw_hwnd() as u32;
         let title = window
@@ -37,15 +37,37 @@ pub fn get_all_targets() -> Result<Vec<Target>> {
             .context("Window title not found")?
             .to_string();
 
-        let target = Target::Window(super::Window {
+        // Get window dimensions
+        let (width, height) = get_window_dimensions(HWND(window.as_raw_hwnd()));
+
+        let target = Target::Window(Window {
             id,
             title,
+            width,
+            height,
+            app_name: String::new(), // TODO: Get actual app name
+            app_bundle_id: String::new(), // TODO: Get actual bundle ID  
+            is_on_screen: true, // TODO: Check if window is visible
+            process_id: 0, // TODO: Get actual process ID
+            window_level: 0,
+            has_shadow: true,
+            is_transparent: false,
             raw_handle: HWND(window.as_raw_hwnd()),
         });
         targets.push(target);
     }
 
     Ok(targets)
+}
+
+fn get_window_dimensions(hwnd: HWND) -> (u64, u64) {
+    unsafe {
+        let mut rect = RECT::default();
+        let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect);
+        let width = (rect.right - rect.left) as u64;
+        let height = (rect.bottom - rect.top) as u64;
+        (width, height)
+    }
 }
 
 pub fn get_main_display() -> Result<Display> {
@@ -58,8 +80,8 @@ pub fn get_main_display() -> Result<Display> {
             .device_name()
             .context("Failed to get monitor name")?,
         raw_handle: HMONITOR(display.as_raw_hmonitor()),
-        width: display.width()? as u16,
-        height: display.height()? as u16,
+        width: display.width()? as u64,
+        height: display.height()? as u64,
     })
 }
 
@@ -81,36 +103,24 @@ pub fn get_scale_factor(target: &Target) -> f64 {
             )
             .is_ok()
             {
-                dpi_x.into()
+                dpi_x
             } else {
                 BASE_DPI
             }
         },
     };
 
-    let scale_factor = dpi as f64 / BASE_DPI as f64;
-    scale_factor as f64
+    dpi as f64 / BASE_DPI as f64
 }
 
 pub fn get_target_dimensions(target: &Target) -> (u64, u64) {
     match target {
-        Target::Window(window) => unsafe {
-            let hwnd = window.raw_handle;
-
-            // get width and height of the window
-            let mut rect = RECT::default();
-            let _ = windows::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect);
-            let width = rect.right - rect.left;
-            let height = rect.bottom - rect.top;
-
-            (width as u64, height as u64)
-        },
+        Target::Window(window) => (window.width, window.height),
         Target::Display(display) => {
             let monitor = Monitor::from_raw_hmonitor(display.raw_handle.0);
-
             (
-                monitor.width().unwrap() as u64,
-                monitor.height().unwrap() as u64,
+                monitor.width().unwrap_or(1920) as u64,
+                monitor.height().unwrap_or(1080) as u64,
             )
         }
     }

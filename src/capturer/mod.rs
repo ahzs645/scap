@@ -1,169 +1,276 @@
 use std::sync::Arc;
 use anyhow::Result;
 
-use super::Options;
-use crate::frame::Frame;
-use crate::capturer::{async_frame::AsyncFrameSender, frame_pool::FramePool};
+use crate::{
+    frame::{Frame, FrameType},
+    targets::Target,
+};
 
-#[cfg(target_os = "macos")]
-pub mod mac;
+// Submodules
+pub mod async_frame;
+pub mod frame_pool;
+pub mod error_recovery;
+pub mod engine;
 
-#[cfg(target_os = "windows")]
-mod win;
+// Re-exports
+pub use async_frame::{AsyncFrameReceiver, AsyncFrameSender, CaptureState};
+pub use frame_pool::FramePool;
+pub use error_recovery::{ErrorRecovery, ErrorRecoveryConfig};
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
-mod linux;
+#[derive(Debug, Clone)]
+pub struct Point {
+    pub x: f64,
+    pub y: f64,
+}
 
-// Simplified channel item types to avoid compilation issues
-#[cfg(target_os = "macos")]
-pub type ChannelItem = (Vec<u8>, u32, u32); // (data, width, height) - simplified
-#[cfg(not(target_os = "macos"))]
-pub type ChannelItem = Frame;
+#[derive(Debug, Clone)]
+pub struct Size {
+    pub width: f64,
+    pub height: f64,
+}
 
-pub fn get_output_frame_size(options: &Options) -> [u32; 2] {
-    #[cfg(target_os = "macos")]
-    {
-        mac::get_output_frame_size(options)
-    }
+#[derive(Debug, Clone)]
+pub struct Area {
+    pub origin: Point,
+    pub size: Size,
+}
 
-    #[cfg(target_os = "windows")]
-    {
-        win::get_output_frame_size(options)
-    }
+#[derive(Debug, Clone, Copy)]
+pub enum Resolution {
+    _480p,
+    _720p,
+    _1080p,
+    _1440p,
+    _2160p,
+    _4320p,
+    Captured,
+}
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    {
-        // TODO: How to calculate this on Linux?
-        [1920, 1080]
+impl Resolution {
+    pub fn value(&self, _aspect_ratio: f32) -> [u32; 2] {
+        match self {
+            Resolution::_480p => [640, 480],
+            Resolution::_720p => [1280, 720],
+            Resolution::_1080p => [1920, 1080],
+            Resolution::_1440p => [2560, 1440],
+            Resolution::_2160p => [3840, 2160],
+            Resolution::_4320p => [7680, 4320],
+            Resolution::Captured => [1920, 1080], // Default fallback
+        }
     }
 }
 
-pub struct Engine {
+#[derive(Debug, Clone)]
+pub struct WindowAudioOptions {
+    pub capture_window_audio_only: bool,
+    pub include_system_notifications: bool,
+    pub audio_ducking: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct Options {
+    pub fps: u32,
+    pub show_cursor: bool,
+    pub show_highlight: bool,
+    pub target: Option<Target>,
+    pub crop_area: Option<Area>,
+    pub output_type: FrameType,
+    pub output_resolution: Resolution,
+    pub excluded_targets: Option<Vec<Target>>,
+    
+    // Audio options
+    pub capture_system_audio: Option<bool>,
+    pub exclude_current_process_audio: Option<bool>,
+    pub audio_sample_rate: Option<u32>,
+    pub audio_channel_count: Option<u32>,
+    pub capture_microphone: Option<bool>,
+    pub microphone_device_id: Option<String>,
+    pub window_audio: Option<WindowAudioOptions>,
+    
+    // Window-specific options
+    pub exclude_overlapping_windows: Option<bool>,
+    pub window_frame_padding: Option<f64>,
+    pub match_window_resolution: Option<bool>,
+    pub include_window_shadow: Option<bool>,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            fps: 30,
+            show_cursor: true,
+            show_highlight: false,
+            target: None,
+            crop_area: None,
+            output_type: FrameType::BGRAFrame,
+            output_resolution: Resolution::Captured,
+            excluded_targets: None,
+            capture_system_audio: Some(false),
+            exclude_current_process_audio: Some(true),
+            audio_sample_rate: Some(48000),
+            audio_channel_count: Some(2),
+            capture_microphone: Some(false),
+            microphone_device_id: None,
+            window_audio: None,
+            exclude_overlapping_windows: None,
+            window_frame_padding: None,
+            match_window_resolution: None,
+            include_window_shadow: None,
+        }
+    }
+}
+
+/// Main capturer struct
+pub struct Capturer {
     options: Options,
-    frame_sender: AsyncFrameSender,
+    engine: Option<engine::Engine>,
     frame_pool: Arc<FramePool>,
-
-    #[cfg(target_os = "macos")]
-    mac_capturer: Option<mac::ScreenCapturer>,
-
-    #[cfg(target_os = "windows")]
-    win: win::WCStream,
-
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    linux: linux::LinuxCapturer,
+    frame_receiver: Option<AsyncFrameReceiver>,
+    is_capturing: bool,
 }
 
-impl Engine {
-    pub fn new(options: Options, frame_sender: AsyncFrameSender, frame_pool: Arc<FramePool>) -> Result<Self> {
-        #[cfg(target_os = "macos")]
-        {
-            let mac_capturer = Some(mac::ScreenCapturer::new(frame_sender.clone(), Arc::clone(&frame_pool)));
-            
-            Ok(Self {
-                options,
-                frame_sender,
-                frame_pool,
-                mac_capturer,
-            })
-        }
+impl Capturer {
+    /// Build a new capturer with the given options
+    pub fn build(options: Options) -> Result<Self> {
+        let frame_pool = Arc::new(FramePool::new());
+        
+        Ok(Self {
+            options,
+            engine: None,
+            frame_pool,
+            frame_receiver: None,
+            is_capturing: false,
+        })
+    }
 
-        #[cfg(target_os = "windows")]
-        {
-            let win = win::create_capturer(&options, frame_sender.clone())?;
-            
-            Ok(Self {
-                options,
-                frame_sender,
-                frame_pool,
-                win,
-            })
+    /// Start capture (sync version)
+    pub fn start_capture_sync(&mut self) -> Result<()> {
+        let (sender, receiver) = async_frame::create_channel();
+        
+        let engine = engine::Engine::new(
+            self.options.clone(),
+            sender,
+            Arc::clone(&self.frame_pool),
+        )?;
+        
+        self.engine = Some(engine);
+        self.frame_receiver = Some(receiver);
+        self.is_capturing = true;
+        
+        // Start the engine in sync mode
+        if let Some(ref mut engine) = self.engine {
+            // For sync operation, we need to handle async calls differently
+            // This is a simplified approach
+            tokio::runtime::Handle::try_current()
+                .map(|handle| {
+                    handle.block_on(async {
+                        engine.start_capture().await
+                    })
+                })
+                .unwrap_or_else(|_| {
+                    // If no tokio runtime, create a simple runtime
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()?;
+                    rt.block_on(async {
+                        engine.start_capture().await
+                    })
+                })?;
         }
+        
+        Ok(())
+    }
 
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        {
-            let linux = linux::create_capturer(&options, frame_sender.clone())?;
-            
-            Ok(Self {
-                options,
-                frame_sender,
-                frame_pool,
-                linux,
-            })
+    /// Stop capture (sync version)
+    pub fn stop_capture_sync(&mut self) -> Result<()> {
+        self.is_capturing = false;
+        
+        if let Some(ref mut engine) = self.engine {
+            tokio::runtime::Handle::try_current()
+                .map(|handle| {
+                    handle.block_on(async {
+                        engine.stop_capture().await
+                    })
+                })
+                .unwrap_or_else(|_| {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()?;
+                    rt.block_on(async {
+                        engine.stop_capture().await
+                    })
+                })?;
+        }
+        
+        Ok(())
+    }
+
+    /// Get next frame (sync version)
+    pub fn get_next_frame_sync(&mut self) -> Result<Frame> {
+        if let Some(ref mut receiver) = self.frame_receiver {
+            match receiver.try_recv() {
+                Ok(frame) => Ok(frame),
+                Err(e) => Err(e),
+            }
+        } else {
+            Err(anyhow::anyhow!("Capturer not started"))
         }
     }
 
+    /// Get output frame size
+    pub fn get_output_frame_size(&mut self) -> [u32; 2] {
+        if let Some(ref mut engine) = self.engine {
+            engine.get_output_frame_size()
+        } else {
+            engine::get_output_frame_size(&self.options)
+        }
+    }
+
+    /// Async versions for compatibility
     pub async fn start_capture(&mut self) -> Result<()> {
-        #[cfg(target_os = "macos")]
-        {
-            if let Some(ref mut capturer) = self.mac_capturer {
-                capturer.start_capture(&self.options).await?;
-            }
-            Ok(())
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            self.win.start_capture();
-            Ok(())
-        }
-
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        {
-            self.linux.start_capture();
-            Ok(())
-        }
+        let (sender, receiver) = async_frame::create_channel();
+        
+        let mut engine = engine::Engine::new(
+            self.options.clone(),
+            sender,
+            Arc::clone(&self.frame_pool),
+        )?;
+        
+        engine.start_capture().await?;
+        
+        self.engine = Some(engine);
+        self.frame_receiver = Some(receiver);
+        self.is_capturing = true;
+        
+        Ok(())
     }
 
     pub async fn stop_capture(&mut self) -> Result<()> {
-        #[cfg(target_os = "macos")]
-        {
-            if let Some(ref mut capturer) = self.mac_capturer {
-                capturer.stop_capture().await?;
-            }
-            Ok(())
+        self.is_capturing = false;
+        
+        if let Some(ref mut engine) = self.engine {
+            engine.stop_capture().await?;
         }
-
-        #[cfg(target_os = "windows")]
-        {
-            self.win.stop_capture();
-            Ok(())
-        }
-
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        {
-            self.linux.stop_capture();
-            Ok(())
-        }
+        
+        Ok(())
     }
 
-    pub fn get_output_frame_size(&mut self) -> [u32; 2] {
-        get_output_frame_size(&self.options)
-    }
-
-    pub async fn process_channel_item(&self, data: ChannelItem) -> Option<Frame> {
-        #[cfg(target_os = "macos")]
-        {
-            // Convert simplified channel item to frame
-            let (data, width, height) = data;
-            
-            // Create a BGRA frame from the data
-            if !data.is_empty() && width > 0 && height > 0 {
-                let display_time = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64;
-                
-                Some(Frame::BGRA(crate::frame::BGRAFrame {
-                    display_time,
-                    width: width as i32,
-                    height: height as i32,
-                    data,
-                }))
-            } else {
-                None
-            }
+    pub async fn get_next_frame(&mut self) -> Result<Frame> {
+        if let Some(ref mut receiver) = self.frame_receiver {
+            receiver.recv().await
+        } else {
+            Err(anyhow::anyhow!("Capturer not started"))
         }
-        #[cfg(not(target_os = "macos"))]
-        Some(data)
+    }
+}
+
+/// Raw capturer for accessing platform-specific features
+pub struct RawCapturer<'a> {
+    _capturer: &'a Capturer,
+}
+
+impl<'a> RawCapturer<'a> {
+    pub fn new(capturer: &'a Capturer) -> Self {
+        Self { _capturer: capturer }
     }
 }

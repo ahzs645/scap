@@ -1,5 +1,5 @@
 use crate::{
-    capturer::{Area, Options, Point, Resolution, Size},
+    capturer::{Area, Options, Point, Resolution, Size, async_frame::AsyncFrameSender},
     frame::{BGRAFrame, Frame, FrameType},
     targets::{self, Target},
 };
@@ -61,7 +61,7 @@ impl GraphicsCaptureApiHandler for Capturer {
                     .buffer_crop(start_x, start_y, end_x, end_y)
                     .expect("Failed to crop buffer");
 
-                // get raw frame buffer
+                // get raw frame buffer - use the correct method name
                 let raw_frame_buffer = match cropped_buffer.as_nopadding_buffer() {
                     Ok(buffer) => buffer,
                     Err(_) => return Err(("Failed to get raw buffer").into()),
@@ -132,7 +132,20 @@ struct FlagStruct {
     pub crop: Option<Area>,
 }
 
-pub fn create_capturer(options: &Options, tx: mpsc::Sender<anyhow::Result<Frame>>) -> WCStream {
+pub fn create_capturer(options: &Options, tx: AsyncFrameSender) -> anyhow::Result<WCStream> {
+    // Convert AsyncFrameSender to mpsc::Sender for Windows capture
+    let (sync_tx, sync_rx) = mpsc::channel();
+    
+    // Spawn a task to bridge between sync and async channels
+    let async_tx = tx.clone();
+    std::thread::spawn(move || {
+        while let Ok(frame_result) = sync_rx.recv() {
+            if let Err(_) = async_tx.send(frame_result) {
+                break; // Channel closed
+            }
+        }
+    });
+    
     let target = options.target.clone().unwrap_or_else(|| {
         Target::Display(targets::get_main_display().expect("Failed to get main display"))
     });
@@ -154,7 +167,7 @@ pub fn create_capturer(options: &Options, tx: mpsc::Sender<anyhow::Result<Frame>
             DrawBorderSettings::Default,
             color_format,
             FlagStruct {
-                tx,
+                tx: sync_tx,
                 crop: Some(get_crop_area(options)),
             },
         )),
@@ -164,16 +177,16 @@ pub fn create_capturer(options: &Options, tx: mpsc::Sender<anyhow::Result<Frame>
             DrawBorderSettings::Default,
             color_format,
             FlagStruct {
-                tx,
+                tx: sync_tx,
                 crop: Some(get_crop_area(options)),
             },
         )),
     };
 
-    WCStream {
+    Ok(WCStream {
         settings,
         capture_control: None,
-    }
+    })
 }
 
 pub fn get_output_frame_size(options: &Options) -> [u32; 2] {

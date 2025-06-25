@@ -108,8 +108,6 @@ impl crate::capturer::RawCapturer<'_> {
 
 /// Utility functions for pixel buffer processing
 pub mod utils {
-    use super::*;
-    
     /// Convert BGRA to RGB
     pub fn bgra_to_rgb(bgra_data: &[u8]) -> Vec<u8> {
         let mut rgb_data = Vec::with_capacity((bgra_data.len() / 4) * 3);

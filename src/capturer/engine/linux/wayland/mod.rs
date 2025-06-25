@@ -31,7 +31,7 @@ use pw::{
 };
 
 use crate::{
-    capturer::Options,
+    capturer::{Options, async_frame::AsyncFrameSender},
     frame::{BGRxFrame, Frame, RGBFrame, RGBxFrame, XBGRFrame},
 };
 
@@ -47,7 +47,7 @@ static STREAM_STATE_CHANGED_TO_ERROR: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone)]
 struct ListenerUserData {
-    pub tx: Sender<Result<Frame>>,
+    pub tx: AsyncFrameSender,
     pub format: spa::param::video::VideoInfoRaw,
 }
 
@@ -123,7 +123,7 @@ fn process_callback(stream: &StreamRef, user_data: &mut ListenerUserData) {
     if let Some(frame_result) = frame_result {
         match user_data.tx.send(frame_result) {
             Ok(()) => {}
-            Err(SendError(_)) => {
+            Err(_) => {
                 log::debug!("Frame receiver was dropped.")
             }
         }
@@ -191,7 +191,7 @@ fn process_callback_impl(
 
 fn start_pipewire_capturer(
     options: Options,
-    tx: Sender<Result<Frame>>,
+    tx: AsyncFrameSender,
     stream_id: u32,
 ) -> Result<MainLoop> {
     pw::init();
@@ -321,7 +321,7 @@ fn start_pipewire_capturer(
 // TODO: Format negotiation
 fn pipewire_capturer(
     options: Options,
-    tx: Sender<Result<Frame>>,
+    tx: AsyncFrameSender,
     ready_sender: &SyncSender<Result<()>>,
     stream_id: u32,
 ) {
@@ -360,7 +360,7 @@ pub struct WaylandCapturer {
 
 impl WaylandCapturer {
     // TODO: Error handling
-    pub fn new(options: &Options, tx: Sender<Result<Frame>>) -> Result<Self> {
+    pub fn new(options: &Options, tx: AsyncFrameSender) -> Result<Self> {
         let connection = dbus::blocking::Connection::new_session()
             .context("Failed to create dbus connection")?;
         let stream_id = ScreenCastPortal::new(&connection)

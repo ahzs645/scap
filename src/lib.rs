@@ -17,10 +17,8 @@ pub use utils::has_permission;
 pub use utils::is_supported;
 pub use utils::request_permission;
 
-#[cfg(target_os = "macos")]
-pub mod engine {
-    pub use crate::capturer::engine::mac;
-}
+// Re-export main capturer types
+pub use capturer::{Capturer, Options, Point, Size, Area, Resolution};
 
 // Re-export NAPI bindings when feature is enabled
 #[cfg(feature = "napi")]

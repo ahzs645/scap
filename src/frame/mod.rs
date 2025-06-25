@@ -81,6 +81,12 @@ pub enum Frame {
     YUVFrame(YUVFrame),
     /// RGB frame data
     RGB(RGBFrame),
+    /// RGBx frame data (RGB with padding)
+    RGBx(RGBxFrame),
+    /// XBGR frame data
+    XBGR(XBGRFrame),
+    /// BGRx frame data
+    BGRx(BGRxFrame),
     /// BGR0 frame data
     BGR0(BGRFrame),
     /// System audio frame data (macOS only)

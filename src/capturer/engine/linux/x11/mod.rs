@@ -5,14 +5,16 @@ use crate::{
 use super::{error::LinCapError, LinuxCapturerImpl};
 
 pub struct X11Capturer {
-    _placeholder: bool,
+    _options: Options,
+    _tx: AsyncFrameSender,
 }
 
 impl X11Capturer {
-    pub fn new(_options: &Options, _tx: AsyncFrameSender) -> Result<Self, LinCapError> {
+    pub fn new(options: &Options, tx: AsyncFrameSender) -> Result<Self, LinCapError> {
         log::warn!("X11 screen capture is not fully implemented in this version");
         Ok(Self {
-            _placeholder: false,
+            _options: options.clone(),
+            _tx: tx,
         })
     }
 }

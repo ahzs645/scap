@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use crate::frame::{AudioFrame, AudioSource};
 use crate::capturer::frame_pool::FramePool;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -52,7 +52,7 @@ impl CMSampleBuffer {
 /// Process audio sample buffer with simplified implementation
 pub fn process_audio_buffer(
     sample_buffer: &CMSampleBuffer,
-    frame_pool: &FramePool,
+    _frame_pool: &FramePool,
 ) -> Result<crate::frame::Frame> {
     let display_time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -78,7 +78,7 @@ pub fn process_audio_buffer(
 /// Enhanced audio processing with format validation
 pub fn process_audio_sample_buffer_enhanced(
     sample_buffer: &CMSampleBuffer,
-    frame_pool: &FramePool,
+    _frame_pool: &FramePool,
 ) -> Result<AudioFrame> {
     let display_time = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -14,11 +14,9 @@ mod win;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 mod linux;
 
+// Simplified channel item types to avoid compilation issues
 #[cfg(target_os = "macos")]
-pub type ChannelItem = (
-    core_media_rs::cm_sample_buffer::CMSampleBuffer,
-    screencapturekit::stream::output_type::SCStreamOutputType,
-);
+pub type ChannelItem = (Vec<u8>, u32, u32); // (data, width, height) - simplified
 #[cfg(not(target_os = "macos"))]
 pub type ChannelItem = Frame;
 
@@ -26,7 +24,11 @@ pub fn get_output_frame_size(options: &Options) -> [u32; 2] {
     #[cfg(target_os = "macos")]
     {
         // Use a simple default for now to avoid compilation issues
-        [1920, 1080]
+        match &options.target {
+            Some(crate::targets::Target::Display(display)) => [display.width as u32, display.height as u32],
+            Some(crate::targets::Target::Window(window)) => [window.width as u32, window.height as u32],
+            None => [1920, 1080],
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -47,7 +49,7 @@ pub struct Engine {
     frame_pool: Arc<FramePool>,
 
     #[cfg(target_os = "macos")]
-    _mac_placeholder: bool,
+    mac_capturer: Option<mac::ScreenCapturer>,
 
     #[cfg(target_os = "windows")]
     win: win::WCStream,
@@ -60,11 +62,13 @@ impl Engine {
     pub fn new(options: Options, frame_sender: AsyncFrameSender, frame_pool: Arc<FramePool>) -> Result<Self> {
         #[cfg(target_os = "macos")]
         {
+            let mac_capturer = Some(mac::ScreenCapturer::new(frame_sender.clone(), Arc::clone(&frame_pool)));
+            
             Ok(Self {
                 options,
                 frame_sender,
                 frame_pool,
-                _mac_placeholder: false,
+                mac_capturer,
             })
         }
 
@@ -96,8 +100,9 @@ impl Engine {
     pub async fn start_capture(&mut self) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            // Placeholder implementation for macOS
-            log::warn!("macOS screen capture not fully implemented in this version");
+            if let Some(ref mut capturer) = self.mac_capturer {
+                capturer.start_capture(&self.options).await?;
+            }
             Ok(())
         }
 
@@ -117,7 +122,9 @@ impl Engine {
     pub async fn stop_capture(&mut self) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            // Placeholder implementation for macOS
+            if let Some(ref mut capturer) = self.mac_capturer {
+                capturer.stop_capture().await?;
+            }
             Ok(())
         }
 
@@ -141,8 +148,25 @@ impl Engine {
     pub async fn process_channel_item(&self, data: ChannelItem) -> Option<Frame> {
         #[cfg(target_os = "macos")]
         {
-            // Placeholder - return None for now
-            None
+            // Convert simplified channel item to frame
+            let (data, width, height) = data;
+            
+            // Create a BGRA frame from the data
+            if !data.is_empty() && width > 0 && height > 0 {
+                let display_time = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64;
+                
+                Some(Frame::BGRA(crate::frame::BGRAFrame {
+                    display_time,
+                    width: width as i32,
+                    height: height as i32,
+                    data,
+                }))
+            } else {
+                None
+            }
         }
         #[cfg(not(target_os = "macos"))]
         Some(data)
