@@ -6,8 +6,10 @@ use core_graphics_helmer_fork::display::{CGDirectDisplayID, CGDisplay, CGMainDis
 use core_graphics_helmer_fork::window::CGWindowID;
 use objc::{msg_send, sel, sel_impl};
 use screencapturekit::shareable_content::SCShareableContent;
+use screencapturekit::display::SCDisplay;
+use screencapturekit::window::SCWindow;
 
-use super::{Display, Target};
+use super::{Display, Target, Window};
 
 fn get_display_name(display_id: CGDirectDisplayID) -> String {
     unsafe {
@@ -35,42 +37,117 @@ fn get_display_name(display_id: CGDirectDisplayID) -> String {
 }
 
 pub fn get_all_targets() -> Result<Vec<Target>> {
-    let mut targets: Vec<Target> = Vec::new();
+    let sc_shareable_content = screencapturekit::ShareableContent::current()
+        .map_err(|e| anyhow::anyhow!("Failed to get shareable content: {}", e))?;
 
-    let content = SCShareableContent::get()
-        .map_err(|e| anyhow::anyhow!("Failed to get shareable content: {:?}", e))?;
+    let mut targets = Vec::new();
 
-    // Add displays to targets
-    for display in content.displays() {
-        let id: CGDirectDisplayID = display.display_id();
-        let raw_handle = CGDisplay::new(id);
-        let title = get_display_name(id);
-
-        let target = Target::Display(super::Display {
-            id,
-            title,
-            raw_handle,
-        });
-
-        targets.push(target);
+    // Add displays
+    for display in sc_shareable_content.displays() {
+        let cg_display = CGDisplay::new(display.display_id() as u32);
+        targets.push(Target::Display(Display {
+            id: display.display_id() as u32,
+            title: format!("Display {}", display.display_id()),
+            width: cg_display.pixels_wide(),
+            height: cg_display.pixels_high(),
+            raw_handle: display,
+        }));
     }
 
-    // Add windows to targets
-    for window in content.windows() {
-        let id = window.window_id();
-        let title = window.title();
-        let title = if title.is_empty() { "Untitled Window".to_string() } else { title };
-        let raw_handle: CGWindowID = id;
-
-        let target = Target::Window(super::Window {
-            id,
-            title,
-            raw_handle,
-        });
-        targets.push(target);
+    // Add windows with better filtering
+    for window in sc_shareable_content.windows() {
+        if !is_system_window(&window) && is_window_capturable(&window) {
+            targets.push(Target::Window(Window {
+                id: window.window_id() as u32,
+                title: window.title().unwrap_or_default(),
+                width: window.frame().size.width as u64,
+                height: window.frame().size.height as u64,
+                raw_handle: window,
+            }));
+        }
     }
 
     Ok(targets)
+}
+
+fn is_system_window(window: &SCWindow) -> bool {
+    let title = window.title().unwrap_or_default();
+    let owner = window.owning_application().map(|app| app.application_name()).flatten().unwrap_or_default();
+    
+    // Check for common system window patterns
+    let system_patterns = [
+        "Menubar",
+        "Dock",
+        "Desktop",
+        "Notification Center",
+        "Control Center",
+        "Status Bar",
+        "Menu Extra",
+        "Spotlight",
+        "Mission Control",
+        "Dashboard",
+    ];
+
+    // Check for system applications
+    let system_apps = [
+        "Finder",
+        "SystemUIServer",
+        "Dock",
+        "WindowServer",
+        "loginwindow",
+        "ControlCenter",
+        "NotificationCenter",
+    ];
+
+    // Check title patterns
+    if system_patterns.iter().any(|pattern| title.contains(pattern)) {
+        return true;
+    }
+
+    // Check owner application
+    if system_apps.iter().any(|app| owner == *app) {
+        return true;
+    }
+
+    // Check window level
+    let window_level = window.window_level();
+    if window_level > 1000 { // System window levels are typically very high
+        return true;
+    }
+
+    false
+}
+
+fn is_window_capturable(window: &SCWindow) -> bool {
+    // Basic checks
+    if !window.is_on_screen() {
+        return false;
+    }
+
+    let title = window.title().unwrap_or_default();
+    if title.is_empty() || title.len() < 3 {
+        return false;
+    }
+
+    // Skip untitled windows
+    if title.starts_with("Untitled") || title.starts_with("Item-") {
+        return false;
+    }
+
+    // Skip windows with no content
+    let frame = window.frame();
+    if frame.size.width < 50.0 || frame.size.height < 50.0 {
+        return false;
+    }
+
+    // Skip windows from the current process
+    if let Some(app) = window.owning_application() {
+        if app.process_id() == std::process::id() {
+            return false;
+        }
+    }
+
+    true
 }
 
 pub fn get_main_display() -> Result<Display> {
@@ -100,10 +177,13 @@ pub fn get_scale_factor(target: &Target) -> f64 {
 
 pub fn get_target_dimensions(target: &Target) -> (u64, u64) {
     match target {
-        Target::Window(_window) => {
-            // For windows, return default dimensions
-            // ScreenCaptureKit will provide the actual window dimensions during capture
-            (1920, 1080) // Default fallback dimensions
+        Target::Window(window) => {
+            // For windows, get actual dimensions from the window
+            if let Some(bounds) = super::super::capturer::engine::mac::window::get_window_bounds_with_shadow(window.id) {
+                (bounds.size.width as u64, bounds.size.height as u64)
+            } else {
+                (window.width, window.height)
+            }
         },
         Target::Display(display) => {
             let mode = display.raw_handle.display_mode().unwrap();

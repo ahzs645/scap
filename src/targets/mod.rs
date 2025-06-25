@@ -13,44 +13,31 @@ pub(crate) mod linux;
 pub struct Window {
     pub id: u32,
     pub title: String,
-
-    #[cfg(target_os = "windows")]
-    pub raw_handle: windows::Win32::Foundation::HWND,
-
-    #[cfg(target_os = "macos")]
-    pub raw_handle: core_graphics_helmer_fork::window::CGWindowID,
-
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    pub raw_handle: xcb::x::Window,
+    pub width: u64,
+    pub height: u64,
+    pub app_name: String,
+    pub app_bundle_id: String,
+    pub is_on_screen: bool,
+    pub process_id: u32,
+    pub window_level: i32,
+    pub has_shadow: bool,
+    pub is_transparent: bool,
+    pub raw_handle: screencapturekit::window::SCWindow,
 }
 
 #[derive(Debug, Clone)]
 pub struct Display {
     pub id: u32,
     pub title: String,
-
-    #[cfg(target_os = "windows")]
-    pub raw_handle: windows::Win32::Graphics::Gdi::HMONITOR,
-
-    #[cfg(target_os = "macos")]
-    pub raw_handle: core_graphics_helmer_fork::display::CGDisplay,
-
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    pub raw_handle: xcb::x::Window,
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
-    pub width: u16,
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
-    pub height: u16,
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    pub x_offset: i16,
-    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-    pub y_offset: i16,
+    pub width: u64,
+    pub height: u64,
+    pub raw_handle: screencapturekit::display::SCDisplay,
 }
 
 #[derive(Debug, Clone)]
 pub enum Target {
-    Window(Window),
     Display(Display),
+    Window(Window),
 }
 
 // Both `HWND` and `HMONITOR` are `Send` and `Sync`, so we can safely implement these traits for `Target`

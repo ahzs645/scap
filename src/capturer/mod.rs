@@ -74,6 +74,13 @@ pub struct Area {
     pub size: Size,
 }
 
+#[derive(Debug, Clone)]
+pub struct WindowAudioOptions {
+    pub capture_window_audio_only: bool,
+    pub include_system_notifications: bool,
+    pub audio_ducking: bool,
+}
+
 /// Options passed to the screen capturer
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -118,6 +125,21 @@ pub struct Options {
 
     /// Microphone device ID (optional, uses default if None)
     pub microphone_device_id: Option<String>,
+
+    /// Window-specific options
+    pub window_audio: Option<WindowAudioOptions>,
+
+    /// Whether to exclude overlapping windows
+    pub exclude_overlapping_windows: Option<bool>,
+
+    /// Window frame padding
+    pub window_frame_padding: Option<f64>,
+
+    /// Whether to match window resolution
+    pub match_window_resolution: Option<bool>,
+
+    /// Whether to include window shadow
+    pub include_window_shadow: Option<bool>,
 }
 
 impl Default for Options {
@@ -125,18 +147,23 @@ impl Default for Options {
         Self {
             target: None,
             output_type: FrameType::BGRAFrame,
-            output_resolution: Resolution::_720p,
+            output_resolution: Resolution::Captured,
             show_cursor: true,
             show_highlight: false,
             crop_area: None,
             fps: 30,
             excluded_targets: None,
-            capture_system_audio: Some(false),
-            exclude_current_process_audio: Some(true),
-            audio_sample_rate: Some(48000),
-            audio_channel_count: Some(2),
-            capture_microphone: Some(false),
+            capture_system_audio: None,
+            exclude_current_process_audio: None,
+            audio_sample_rate: None,
+            audio_channel_count: None,
+            capture_microphone: None,
             microphone_device_id: None,
+            window_audio: None,
+            exclude_overlapping_windows: Some(false),
+            window_frame_padding: None,
+            match_window_resolution: Some(true),
+            include_window_shadow: Some(true),
         }
     }
 }

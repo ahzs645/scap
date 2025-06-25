@@ -1,7 +1,8 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::{cmp, sync::Arc};
-
+use anyhow::Result;
+use core_media_rs::cm_sample_buffer::CMSampleBuffer;
 use screencapturekit::{
     shareable_content::SCShareableContent,
     stream::{
@@ -12,8 +13,6 @@ use screencapturekit::{
         SCStream,
     },
 };
-use core_media_rs::cm_sample_buffer::CMSampleBuffer;
-
 
 use crate::frame::{Frame, FrameType};
 use crate::targets::Target;
@@ -31,8 +30,11 @@ mod pixel_buffer;
 mod pixelformat;
 mod audio_buffer;
 mod cg_fallback;
+mod window;
 
-pub use pixel_buffer::PixelBuffer;
+use pixel_buffer::PixelBuffer;
+use audio_buffer::process_audio_buffer;
+use window::{WindowCaptureSession, WindowEvent, configure_stream_for_window, create_window_filter};
 
 pub struct ScreenCapturer {
     frame_sender: AsyncFrameSender,
@@ -41,14 +43,33 @@ pub struct ScreenCapturer {
 
 impl ScreenCapturer {
     pub fn new(frame_sender: AsyncFrameSender, frame_pool: Arc<FramePool>) -> Self {
-        ScreenCapturer { frame_sender, frame_pool }
+        Self {
+            frame_sender,
+            frame_pool,
+        }
     }
 }
 
 impl SCStreamOutputTrait for ScreenCapturer {
     fn did_output_sample_buffer(&self, sample: CMSampleBuffer, of_type: SCStreamOutputType) {
-        let frame = process_sample_buffer(sample.clone(), of_type, FrameType::BGR0, &self.frame_pool);
-        if let Some(frame) = frame {
+        let pixel_buffer = PixelBuffer::from_channel_item((sample.clone(), of_type));
+        if let Some(pixel_buffer) = pixel_buffer {
+            let width = pixel_buffer.width() as i32;
+            let height = pixel_buffer.height() as i32;
+            let bytes_per_row = pixel_buffer.bytes_per_row();
+            let display_time = pixel_buffer.display_time();
+
+            // Get a buffer from the pool
+            let mut buffer = self.frame_pool.get_video_buffer(bytes_per_row * height as usize);
+            buffer.extend_from_slice(&pixel_buffer.buffer().data());
+
+            let frame = Frame::BGRA(crate::frame::BGRAFrame {
+                display_time,
+                width,
+                height,
+                data: buffer,
+            });
+
             self.frame_sender.send_frame(Ok(frame)).unwrap_or(());
         }
     }
@@ -61,7 +82,10 @@ pub struct AudioCapturer {
 
 impl AudioCapturer {
     pub fn new(frame_sender: AsyncFrameSender, frame_pool: Arc<FramePool>) -> Self {
-        AudioCapturer { frame_sender, frame_pool }
+        Self {
+            frame_sender,
+            frame_pool,
+        }
     }
 }
 
@@ -103,7 +127,7 @@ pub fn create_stream(
     frame_sender: AsyncFrameSender,
     error_flag: Arc<AtomicBool>,
     frame_pool: Arc<FramePool>,
-) -> anyhow::Result<SCStream> {
+) -> Result<SCStream> {
     let filter = match &options.target {
         Some(target) => match target {
             Target::Display(display) => {
@@ -111,7 +135,7 @@ pub fn create_stream(
                     .map_err(|e| anyhow::anyhow!("Failed to create display filter: {}", e))?
             }
             Target::Window(window) => {
-                SCContentFilter::window(window.clone())
+                create_window_filter(target, options)
                     .map_err(|e| anyhow::anyhow!("Failed to create window filter: {}", e))?
             }
         },
@@ -120,16 +144,48 @@ pub fn create_stream(
     };
 
     let mut config = SCStreamConfiguration::new();
-    config.set_shows_cursor(options.show_cursor);
-    config.set_width(1920); // TODO: Get from display
-    config.set_height(1080);
-    config.set_captures_audio(true);
+    
+    // Configure based on target type
+    match &options.target {
+        Some(Target::Window(_)) => {
+            configure_stream_for_window(&mut config, options.target.as_ref().unwrap(), options)?;
+        }
+        _ => {
+            config.set_shows_cursor(options.show_cursor);
+            config.set_width(1920); // TODO: Get from display
+            config.set_height(1080);
+        }
+    }
+
+    // Configure audio
+    let captures_audio = if let Some(window_audio) = &options.window_audio {
+        // Window-specific audio settings
+        config.set_excludes_current_process_audio(true);
+        config.set_audio_application_only(window_audio.capture_window_audio_only);
+        config.set_audio_ducking(window_audio.audio_ducking);
+        true
+    } else {
+        // Default audio settings
+        config.set_excludes_current_process_audio(options.exclude_current_process_audio.unwrap_or(true));
+        options.capture_system_audio.unwrap_or(false)
+    };
+    config.set_captures_audio(captures_audio);
+
+    if let Some(rate) = options.audio_sample_rate {
+        config.set_sample_rate(rate);
+    }
+    if let Some(channels) = options.audio_channel_count {
+        config.set_channel_count(channels);
+    }
 
     let stream = SCStream::new(filter, config)
         .map_err(|e| anyhow::anyhow!("Failed to create stream: {}", e))?;
 
     stream.add_output(ScreenCapturer::new(frame_sender.clone(), Arc::clone(&frame_pool)));
-    stream.add_output(AudioCapturer::new(frame_sender, Arc::clone(&frame_pool)));
+    
+    if captures_audio {
+        stream.add_output(AudioCapturer::new(frame_sender, Arc::clone(&frame_pool)));
+    }
 
     Ok(stream)
 }
@@ -172,18 +228,17 @@ pub fn process_sample_buffer(
     }
 }
 
-pub fn process_audio_buffer(
-    sample_buffer: CMSampleBuffer,
-    frame_pool: &FramePool,
-) -> anyhow::Result<crate::frame::AudioFrame> {
-    audio_buffer::process_audio_sample_buffer_enhanced(sample_buffer, frame_pool)
-}
-
 pub fn get_output_frame_size(options: &Options) -> [u32; 2] {
     match &options.target {
         Some(target) => match target {
             Target::Display(display) => [display.width as u32, display.height as u32],
-            Target::Window(window) => [window.width as u32, window.height as u32],
+            Target::Window(window) => {
+                if let Some(bounds) = window::get_window_bounds_with_shadow(window.id) {
+                    [bounds.size.width as u32, bounds.size.height as u32]
+                } else {
+                    [window.width as u32, window.height as u32]
+                }
+            }
         },
         None => [1920, 1080], // Default size
     }
