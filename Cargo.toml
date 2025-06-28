@@ -16,7 +16,7 @@ keywords = ["screen", "recording", "video", "capture", "media"]
 categories = ["graphics", "multimedia", "multimedia::video"]
 
 [features]
-default = ["wayland"]
+default = []  # No default features
 wayland = ["dep:pipewire", "dep:dbus"]
 
 [dependencies]
