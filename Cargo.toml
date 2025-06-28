@@ -47,3 +47,11 @@ xcb = { version = "1.4.0", features = ["randr", "xlib_xcb", "xfixes"] }
 x11 = "2.21.0"
 pipewire = { version = "0.8.0", optional = true }
 dbus = { version = "0.9.7", optional = true }
+
+# Disable input-native feature on Linux to avoid v4l2/libspa issues
+[target.'cfg(all(target_os = "linux"))'.dependencies]
+nokhwa = { version = "0.10", default-features = false, features = ["serialize"] }
+
+# Enable input-native on other platforms
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+nokhwa = { version = "0.10", features = ["input-native", "serialize"] }
